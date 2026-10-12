@@ -1,0 +1,26 @@
+# Core Data Modeling and Validation
+pydantic>=2.10.0,<3.0.0
+pydantic-settings>=2.0.0
+
+# SQL Compilation and Dialect AST Transpilation
+sqlglot>=26.0.0
+
+# Database Engine
+duckdb>=1.0.0
+
+# Orchestration & Graph Engine
+langchain>=0.3.0
+langchain-core>=0.3.0
+langgraph>=0.2.0
+
+# Embeddings & Vector Storage
+langchain-huggingface>=0.1.0
+langchain-chroma>=0.1.0
+chromadb>=0.5.0
+sentence-transformers>=3.0.0
+
+# Optional Local Inference & HTTP clients
+requests>=2.31.0
+
+# Testing & Quality Assurance
+pytest>=8.0.0

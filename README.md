@@ -86,11 +86,56 @@ Enterprise databases contain dozens of tables and 700+ columns. Models suffer fr
 
 ---
 
-## 5. Running the Pipeline & Test Suite
+## 5. Environment Setup & Configuration
 
-### Run All Unit Tests
+### 5.1 Create Virtual Environment & Install Dependencies
+```bash
+python -m venv .venv
+# On Windows:
+.venv\Scripts\activate
+# On Linux/macOS:
+# source .venv/bin/activate
+
+pip install -r requirements.txt
+```
+
+### 5.2 Configure Environment Variables
+Copy `.env.example` to `.env`:
+```bash
+cp .env.example .env
+```
+
+### 5.3 LLM Backend Options & Hardware Considerations
+The engine supports 4 configurable LLM backend modes via `TEXT2SQL_LLM_BACKEND`:
+
+1. **Deterministic Test Mock (`TEXT2SQL_LLM_BACKEND=mock`)**:
+   - Zero-cost, 100% offline, requires no external services or GPU resources.
+   - Generates realistic, schema-valid `LogicPlan` objects for unit testing and offline pipeline execution.
+2. **Local Ollama with Qwen Coder (`TEXT2SQL_LLM_BACKEND=ollama`)**:
+   - Install [Ollama](https://ollama.ai) and pull the model:
+     ```bash
+     ollama pull qwen2.5-coder:7b
+     ```
+   - Hardware requirements:
+     - `qwen2.5-coder:7b`: ~8GB VRAM (or 16GB system RAM on CPU). Recommended for local laptops.
+     - `Qwen2.5-Coder-32B-Instruct`: ~20-24GB VRAM (e.g. RTX 3090/4090 or Apple Silicon M2/M3 with 36GB+ Unified Memory).
+3. **Hugging Face Hub API (`TEXT2SQL_LLM_BACKEND=huggingface`)**:
+   - Set `TEXT2SQL_HF_API_TOKEN=your_token` in `.env` (or via `HF_TOKEN` environment variable).
+4. **Auto-Resolution (`TEXT2SQL_LLM_BACKEND=auto`)**:
+   - Automatically probes local Ollama, falls back to HuggingFace if token exists, and uses the test mock in development mode. In production (`TEXT2SQL_ENV=production`), fails closed if no real model is reachable.
+
+---
+
+## 6. Running the Test Suite & Pipeline
+
+### Run Full Test Suite (Offline, Zero-Cost)
 ```bash
 python -m pytest text2sql_engine/tests -v
+```
+
+### Run Problem 1 Specific Tests (Including Cohort Retention Integration Test)
+```bash
+python -m pytest text2sql_engine/tests/test_problem1.py -v
 ```
 
 ### Run Pipeline End-to-End Orchestrator
@@ -102,6 +147,8 @@ python main.py
 ```
 --- [Query 1] 'Find the top 3 customers ranked by total spend with safe division handling' (Target Dialect: DUCKDB) ---
 [Candidate Tables Selected]: ['customers', 'orders', 'order_items']
+[Discovered Database Literals]: {}
+
 [Compiled & Transpiled SQL]:
 WITH customer_spend AS (
   SELECT

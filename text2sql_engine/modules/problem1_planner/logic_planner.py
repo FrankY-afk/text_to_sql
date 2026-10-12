@@ -4,17 +4,23 @@ from __future__ import annotations
 
 import re
 import json
-from typing import Any, Dict, List, Optional
-import sqlglot
-from sqlglot import exp
+from typing import Any, Dict, List, Optional, Set
 from langchain_core.messages import SystemMessage, HumanMessage
 
 from text2sql_engine.core.config import get_llm
+from text2sql_engine.core.exceptions import (
+    PlanGenerationError,
+    PlanValidationError,
+    DependencyValidationError,
+)
 from text2sql_engine.modules.problem1_planner.schemas import (
     DialectFunctionSpec,
     CTEPlanStep,
     LogicPlan,
+    normalize_dialect,
 )
+from text2sql_engine.modules.problem1_planner.dependency_validator import CTEDependencyValidator
+from text2sql_engine.modules.problem1_planner.sql_compiler import SQLCompiler
 
 
 # Curated dialect knowledge base for Spider 2.0 failure modes
@@ -25,7 +31,7 @@ DIALECT_CATALOG: List[DialectFunctionSpec] = [
         dialect="duckdb",
         category="datetime",
         syntax_pattern="date_diff('{unit}', {start_date}, {end_date})",
-        description="Calculates date difference in DuckDB. Unit is first argument string (e.g., 'day', 'month').",
+        description="Calculates date difference in DuckDB. Unit is first argument string (e.g., 'day', 'month', 'week').",
         notes="DuckDB uses unit first: date_diff('day', start, end)",
     ),
     DialectFunctionSpec(
@@ -58,14 +64,14 @@ DIALECT_CATALOG: List[DialectFunctionSpec] = [
         dialect="duckdb",
         category="datetime",
         syntax_pattern="date_trunc('{part}', {timestamp_col})",
-        description="Truncates timestamp to specified granularity in DuckDB (e.g., 'month', 'year').",
+        description="Truncates timestamp to specified granularity in DuckDB (e.g., 'week', 'month', 'year').",
     ),
     DialectFunctionSpec(
         name="DATE_TRUNC",
         dialect="bigquery",
         category="datetime",
         syntax_pattern="DATE_TRUNC({date_col}, {PART})",
-        description="Truncates date to specified part in BigQuery. Part is unquoted (e.g. MONTH, YEAR).",
+        description="Truncates date to specified part in BigQuery. Part is unquoted (e.g. WEEK, MONTH, YEAR).",
     ),
     DialectFunctionSpec(
         name="DATE_TRUNC",
@@ -181,22 +187,20 @@ class DialectFunctionRAG:
 
     def retrieve(self, user_query: str, dialect: str) -> List[DialectFunctionSpec]:
         """Retrieve relevant dialect specs matching target dialect and query intent."""
-        norm_dialect = dialect.lower().strip()
+        norm_dialect = normalize_dialect(dialect)
         query_lower = user_query.lower()
         matched: List[DialectFunctionSpec] = []
 
-        # Keywords mapping to categories
-        detect_datetime = any(k in query_lower for k in ["date", "day", "month", "year", "diff", "interval", "duration", "age", "recent", "time"])
-        detect_safe_div = any(k in query_lower for k in ["ratio", "percent", "average", "avg", "rate", "divide", "share", "proportion"])
-        detect_window = any(k in query_lower for k in ["rank", "top", "row_number", "dense_rank", "lead", "lag", "running", "cumulative", "cohort", "first", "latest", "most recent"])
+        # Intent detection
+        detect_datetime = any(k in query_lower for k in ["date", "day", "month", "year", "week", "diff", "interval", "duration", "age", "recent", "time", "elapsed"])
+        detect_safe_div = any(k in query_lower for k in ["ratio", "percent", "average", "avg", "rate", "divide", "share", "proportion", "spend", "retention"])
+        detect_window = any(k in query_lower for k in ["rank", "top", "row_number", "dense_rank", "ntile", "lead", "lag", "running", "cumulative", "cohort", "first", "latest", "most recent"])
         detect_string_agg = any(k in query_lower for k in ["list", "comma", "concat", "combine", "strings", "names of"])
 
         for spec in self.catalog:
-            # Check dialect match
             if spec.dialect != norm_dialect:
                 continue
 
-            # Check category relevance
             if spec.category == "datetime" and detect_datetime:
                 matched.append(spec)
             elif spec.category == "null_handling" and detect_safe_div:
@@ -206,7 +210,7 @@ class DialectFunctionRAG:
             elif spec.category == "aggregation" and detect_string_agg:
                 matched.append(spec)
 
-        # If none matched specific keywords, include safe division and datetime defaults for robustness
+        # Fallback defaults for robustness
         if not matched:
             for spec in self.catalog:
                 if spec.dialect == norm_dialect and spec.category in ["null_handling", "datetime"]:
@@ -216,15 +220,16 @@ class DialectFunctionRAG:
 
 
 class LogicPlanner:
-    """Problem 1 Solution: CTE Logic Planner & Dialect Function RAG.
+    """Problem 1: CTE Logic Planner & Dialect Function RAG.
     
-    Solves Erroneous Data Analysis (35.5% of Spider 2.0 errors) by decomposing complex
-    queries into explicit, modular CTE steps and verifying dialect-specific function syntax.
+    Deconstructs complex natural language queries into verified, modular CTE steps
+    with dialect-aware function rules, robust dependency checking, and fail-closed compilation.
     """
 
     def __init__(self, llm: Optional[Any] = None):
-        self.llm = llm or get_llm(temperature=0.0)
+        self.llm = llm or get_llm()
         self.rag = DialectFunctionRAG()
+        self.compiler = SQLCompiler()
 
     def generate_logic_plan(
         self,
@@ -232,9 +237,10 @@ class LogicPlanner:
         schema_context: str,
         dialect: str = "duckdb",
         matched_literals: Optional[Dict[str, str]] = None,
+        available_base_tables: Optional[Set[str]] = None,
     ) -> LogicPlan:
         """Deconstructs the user query into a verified LogicPlan with CTE steps."""
-        dialect = dialect.lower().strip()
+        dialect = normalize_dialect(dialect)
         dialect_specs = self.rag.retrieve(user_query, dialect)
         dialect_notes = "\n".join(
             f"- {spec.name} ({spec.category}): {spec.syntax_pattern} -> {spec.description} (Notes: {spec.notes or 'None'})"
@@ -246,6 +252,14 @@ class LogicPlanner:
             literals_info = "\nDiscovered Database Literals:\n" + "\n".join(
                 f"- Entity '{k}' maps to literal filter: {v}" for k, v in matched_literals.items()
             )
+
+        # Extract base tables from schema_context if not explicitly provided
+        base_tables = set(available_base_tables) if available_base_tables is not None else set()
+        for line in schema_context.splitlines():
+            line_str = line.strip()
+            if line_str.startswith("Table:"):
+                tbl_name = line_str.split("Table:", 1)[1].strip().split()[0]
+                base_tables.add(tbl_name)
 
         prompt = f"""You are an elite SQL Architect solving Spider 2.0 benchmark tasks.
 Your goal is to build a modular Common Table Expression (CTE) Logic Plan for the user query.
@@ -263,11 +277,25 @@ USER QUERY:
 {user_query}
 
 RULES:
-1. Divide complex logic into distinct CTE steps (e.g. step 1: filter & clean, step 2: aggregations & safe division, step 3: window rankings / differences).
-2. For any division, ALWAYS protect against zero division: use NULLIF(denominator, 0) or dialect equivalent.
-3. For dates, adhere STRICTLY to the target dialect's syntax and argument order.
-4. If PostgreSQL is the dialect, DO NOT USE QUALIFY; use a CTE with ROW_NUMBER() and filter on the row number in the next step.
-5. Return ONLY a valid JSON object matching this schema:
+1. Deconstruct complex logic into a topologically ordered sequence of CTE steps.
+   - For multi-stage analytical calculations (e.g. cohort retention, cohort aggregations, multi-level rankings):
+     step 1: identify cohort/base filter,
+     step 2: compute cohort size / intermediate grain,
+     step 3: join and compute metrics,
+     step 4: final projection.
+2. For any division, ALWAYS guard against zero-division using NULLIF(denominator, 0) or dialect equivalent.
+3. For dates and window functions, strictly follow the target dialect syntax patterns listed above.
+4. If target dialect is postgres, DO NOT USE QUALIFY; use ROW_NUMBER() in a CTE and filter in the next step.
+5. Every CTE step MUST specify:
+   - "step_name": valid SQL identifier (alphanumeric/underscore)
+   - "purpose": concise explanation
+   - "source_tables": list of upstream base tables or preceding CTEs
+   - "math_logic": explicit formulas, aggregations, window operations
+   - "filter_conditions": list of filter expressions
+   - "group_by_columns": list of grouping columns
+   - "columns_produced": explicit list of output columns
+   - "sql_fragment": valid SELECT statement defining this CTE (excluding WITH and CTE name)
+6. Output ONLY a valid JSON object matching this exact schema:
 {{
   "query": "{user_query}",
   "target_dialect": "{dialect}",
@@ -299,226 +327,37 @@ RULES:
             # Extract JSON block if wrapped in markdown
             json_match = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", content, re.DOTALL)
             if json_match:
-                content = json_match.group(1)
+                content = json_match.group(1).strip()
+            elif not content.startswith("{") and "{" in content:
+                # Find outermost JSON object
+                start_idx = content.find("{")
+                end_idx = content.rfind("}")
+                if start_idx != -1 and end_idx != -1 and end_idx > start_idx:
+                    content = content[start_idx : end_idx + 1]
 
             data = json.loads(content)
             data["dialect_functions_used"] = dialect_specs
-            return LogicPlan(**data)
-        except Exception:
-            # Fallback to deterministic AST synthesis when LLM is offline / mock
-            return self._synthesize_deterministic_plan(
-                user_query=user_query,
-                schema_context=schema_context,
-                dialect=dialect,
-                dialect_specs=dialect_specs,
-                matched_literals=matched_literals,
+            
+            # Explicitly mark backend
+            backend_id = getattr(self.llm, "backend_name", None) or ("mock" if getattr(self.llm, "is_mock", False) else "real_llm")
+            data["planner_backend"] = backend_id
+
+            # Validate against Pydantic schema
+            plan = LogicPlan.model_validate(data)
+
+            # Validate CTE dependencies, ordering, and columns with AST inspector
+            CTEDependencyValidator.validate_plan(
+                plan,
+                available_base_tables=base_tables if base_tables else None,
             )
 
-    def _synthesize_deterministic_plan(
-        self,
-        user_query: str,
-        schema_context: str,
-        dialect: str,
-        dialect_specs: List[DialectFunctionSpec],
-        matched_literals: Optional[Dict[str, str]] = None,
-    ) -> LogicPlan:
-        """Schema-aware deterministic plan synthesis for offline / zero-cost verification."""
-        q_lower = user_query.lower()
-        matched_literals = matched_literals or {}
+            return plan
 
-        # Parse tables and columns from schema_context
-        tables_map: Dict[str, List[str]] = {}
-        current_tbl = None
-        for line in schema_context.splitlines():
-            line_str = line.strip()
-            if line_str.startswith("Table:"):
-                current_tbl = line_str.split("Table:", 1)[1].strip()
-                tables_map[current_tbl] = []
-            elif current_tbl and line_str.startswith("-"):
-                col = line_str[1:].strip().split()[0]
-                tables_map[current_tbl].append(col)
-
-        # Detect primary tables
-        is_web = "web_events" in tables_map and any(w in q_lower for w in ["event", "campaign", "traffic", "click", "page"])
-        is_order = "orders" in tables_map and any(w in q_lower for w in ["order", "purchas", "spend", "revenue", "amount", "transaction"])
-        is_customer = "customers" in tables_map and any(w in q_lower for w in ["customer", "user", "client"])
-
-        # Determine filter clauses
-        filters = []
-        requires_customer_join = False
-        for entity, literal_clause in matched_literals.items():
-            if "state_code" in literal_clause:
-                requires_customer_join = True
-                filters.append(f"customers.{literal_clause}")
-            elif "order_status" in literal_clause:
-                filters.append(f"orders.{literal_clause}")
-            else:
-                filters.append(literal_clause)
-
-        filter_clause = f" WHERE {' AND '.join(filters)}" if filters else ""
-
-        # Case 1: Web events with nested GA4 struct/array
-        if is_web:
-            sql_frag = """SELECT 
-                event_id,
-                geo_info.city AS city,
-                geo_info.region AS region,
-                ep.key AS param_key,
-                ep.value.string_value AS param_val
-            FROM web_events, UNNEST(event_params) AS t(ep)"""
-            if "california" in q_lower:
-                sql_frag += " WHERE geo_info.region = 'California' AND ep.key = 'campaign'"
-            cte1 = CTEPlanStep(
-                step_name="unnested_events",
-                purpose="Unnest GA4 event_params array and project geo_info fields",
-                source_tables=["web_events"],
-                math_logic="UNNEST(event_params) extraction",
-                columns_produced=["event_id", "city", "region", "param_key", "param_val"],
-                sql_fragment=sql_frag,
-            )
-            return LogicPlan(
-                query=user_query,
-                target_dialect=dialect,
-                strategy="Unnest nested ARRAY/STRUCT parameters and filter by campaign/region",
-                cte_steps=[cte1],
-                final_select="SELECT event_id, city, region, param_key, param_val FROM unnested_events ORDER BY event_id ASC",
-                dialect_functions_used=dialect_specs,
-            )
-
-        # Case 2: Date interval / elapsed calculation
-        is_datediff = any(w in q_lower for w in ["days between", "duration", "datediff", "date_diff", "interval", "elapsed"])
-        if is_datediff and "orders" in tables_map:
-            diff_expr = "date_diff('day', orders.order_date, CURRENT_DATE)"
-
-            cte1 = CTEPlanStep(
-                step_name="elapsed_orders",
-                purpose="Calculate elapsed days from order date using dialect function",
-                source_tables=["orders"],
-                math_logic=f"{diff_expr} AS days_elapsed",
-                filter_conditions=filters,
-                columns_produced=["order_id", "customer_id", "total_amount", "days_elapsed"],
-                sql_fragment=f"SELECT orders.order_id, orders.customer_id, orders.total_amount, {diff_expr} AS days_elapsed FROM orders{filter_clause}",
-            )
-            return LogicPlan(
-                query=user_query,
-                target_dialect=dialect,
-                strategy="Dialect-specific date difference computation",
-                cte_steps=[cte1],
-                final_select="SELECT order_id, customer_id, total_amount, days_elapsed FROM elapsed_orders ORDER BY total_amount DESC LIMIT 5",
-                dialect_functions_used=dialect_specs,
-            )
-
-        # Case 3: Customer Total Spend with Safe Division (Query 1)
-        if (is_customer or "spend" in q_lower or "ratio" in q_lower) and "orders" in tables_map:
-            safe_ratio = "ROUND(SUM(orders.shipping_cost) * 1.0 / NULLIF(SUM(orders.total_amount), 0), 4)"
-            step1 = CTEPlanStep(
-                step_name="customer_spend",
-                purpose="Aggregate order revenue and compute safe shipping ratio per customer",
-                source_tables=["orders"],
-                math_logic=f"SUM(orders.total_amount) AS total_spent, {safe_ratio} AS shipping_ratio",
-                group_by_columns=["orders.customer_id"],
-                columns_produced=["customer_id", "total_spent", "shipping_ratio"],
-                sql_fragment=f"SELECT orders.customer_id, SUM(orders.total_amount) AS total_spent, {safe_ratio} AS shipping_ratio FROM orders GROUP BY orders.customer_id",
-            )
-            return LogicPlan(
-                query=user_query,
-                target_dialect=dialect,
-                strategy="Aggregate customer order spend with safe division and rank top spenders",
-                cte_steps=[step1],
-                final_select="SELECT customer_id, total_spent, shipping_ratio FROM customer_spend ORDER BY total_spent DESC LIMIT 3",
-                dialect_functions_used=dialect_specs,
-            )
-
-        # Case 4: Purchases with Customer Join & Filter (Query 2)
-        if requires_customer_join and "orders" in tables_map:
-            from_clause = "orders JOIN customers ON orders.customer_id = customers.customer_id"
-            step1 = CTEPlanStep(
-                step_name="ranked_orders",
-                purpose="Join orders with customers, filter by demographic literal, and assign rank",
-                source_tables=["orders", "customers"],
-                math_logic="ROW_NUMBER() OVER (ORDER BY orders.total_amount DESC) AS rank_order",
-                filter_conditions=filters,
-                columns_produced=["order_id", "customer_id", "total_amount", "rank_order"],
-                sql_fragment=f"SELECT orders.order_id, orders.customer_id, orders.total_amount, ROW_NUMBER() OVER (ORDER BY orders.total_amount DESC) AS rank_order FROM {from_clause}{filter_clause}",
-            )
-            return LogicPlan(
-                query=user_query,
-                target_dialect=dialect,
-                strategy="Join orders to customers, filter on literal state code, rank by amount",
-                cte_steps=[step1],
-                final_select="SELECT order_id, customer_id, total_amount, rank_order FROM ranked_orders WHERE rank_order <= 5 ORDER BY rank_order ASC",
-                dialect_functions_used=dialect_specs,
-            )
-
-        # Default fallback
-        primary_tbl = list(tables_map.keys())[0] if tables_map else "orders"
-        step1 = CTEPlanStep(
-            step_name="base_records",
-            purpose="Base table projection",
-            source_tables=[primary_tbl],
-            math_logic="Direct select",
-            columns_produced=["*"],
-            sql_fragment=f"SELECT * FROM {primary_tbl}{filter_clause}",
-        )
-        return LogicPlan(
-            query=user_query,
-            target_dialect=dialect,
-            strategy="Direct base query",
-            cte_steps=[step1],
-            final_select="SELECT * FROM base_records LIMIT 10",
-            dialect_functions_used=dialect_specs,
-        )
+        except (json.JSONDecodeError, ValueError, DependencyValidationError, PlanValidationError) as e:
+            raise PlanGenerationError(f"Failed to generate valid LogicPlan for query '{user_query}': {e}") from e
+        except Exception as e:
+            raise PlanGenerationError(f"Inference or planning error for query '{user_query}': {e}") from e
 
     def compile_sql(self, logic_plan: LogicPlan, target_dialect: Optional[str] = None) -> str:
-        """Converts the LogicPlan into executable, validated dialect-specific SQL."""
-        dialect = (target_dialect or logic_plan.target_dialect).lower().strip()
-
-        # Build CTE chaining
-        if logic_plan.cte_steps:
-            cte_definitions = []
-            for step in logic_plan.cte_steps:
-                fragment = step.sql_fragment.strip().rstrip(";")
-                cte_definitions.append(f"{step.step_name} AS (\n    {fragment}\n)")
-            raw_sql = f"WITH {', '.join(cte_definitions)}\n{logic_plan.final_select.strip().rstrip(';')};"
-        else:
-            raw_sql = f"{logic_plan.final_select.strip().rstrip(';')};"
-
-        # Transpile / validate AST with SQLGlot
-        # Map dialect names to SQLGlot dialect identifiers
-        sqlglot_dialect_map = {
-            "duckdb": "duckdb",
-            "postgres": "postgres",
-            "postgresql": "postgres",
-            "bigquery": "bigquery",
-            "snowflake": "snowflake",
-            "sqlite": "sqlite",
-        }
-        target_sqlglot_dialect = sqlglot_dialect_map.get(dialect, "duckdb")
-
-        try:
-            # Parse AST
-            ast = sqlglot.parse_one(raw_sql, read="duckdb")
-
-            # Check if Postgres has QUALIFY clause (not supported natively in Postgres)
-            if target_sqlglot_dialect == "postgres":
-                # SQLGlot can transpile qualify or we ensure CTE representation
-                transpiled = sqlglot.transpile(
-                    raw_sql,
-                    read="duckdb",
-                    write=target_sqlglot_dialect,
-                    pretty=True,
-                )[0]
-                return transpiled
-
-            # Transpile to target dialect
-            transpiled = sqlglot.transpile(
-                raw_sql,
-                read="duckdb",
-                write=target_sqlglot_dialect,
-                pretty=True,
-            )[0]
-            return transpiled
-
-        except Exception as e:
-            # If SQLGlot parsing raises, return formatted raw SQL with warning comment
-            return f"/* AST Transpilation Note: {str(e)} */\n{raw_sql}"
+        """Compiles validated LogicPlan into target SQL dialect using SQLCompiler."""
+        return self.compiler.compile(logic_plan, target_dialect=target_dialect)
