@@ -30,9 +30,14 @@ class SQLAgentState(TypedDict, total=False):
 
     # Validation & Database Execution outputs
     ast_valid: bool
+    execution_status: str  # COMPILED, EXECUTED, FAILED, UNSUPPORTED_EXECUTION_BACKEND
     execution_result: Optional[List[Dict[str, Any]]]
     error: Optional[str]
+    failed_stage: Optional[str]  # retrieval, planning, compilation, execution
+    error_category: Optional[str]  # validation, dependency, syntax, dialect, runtime, configuration
+    repair_notes: Optional[str]
     retry_count: int
+    max_retries: int
 
     # LangGraph conversation history
     messages: Annotated[Sequence[BaseMessage], add_messages]

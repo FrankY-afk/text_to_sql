@@ -138,9 +138,12 @@ def init_sample_database(db_path: Optional[str] = None) -> duckdb.DuckDBPyConnec
 
 
 if __name__ == "__main__":
-    db_file = os.path.join(os.path.dirname(__file__), "warehouse.duckdb")
+    from text2sql_engine.core.config import get_settings
+    settings = get_settings()
+    db_file = settings.duckdb_path
     con = init_sample_database(db_file)
     print(f"Sample DuckDB created at {db_file}")
     tables = con.execute("SHOW TABLES;").fetchall()
     print("Tables created:", [t[0] for t in tables])
     con.close()
+

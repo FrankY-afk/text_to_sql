@@ -2,12 +2,26 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Set
 import sqlglot
 from sqlglot import exp
 
 from text2sql_engine.core.exceptions import DependencyValidationError, PlanValidationError
 from text2sql_engine.modules.problem1_planner.schemas import CTEPlanStep, LogicPlan
+
+
+@dataclass
+class ValidationReport:
+    """Detailed summary of CTE dependency and semantic verification."""
+
+    is_valid: bool
+    verified_tables: Set[str] = field(default_factory=set)
+    unverified_tables: Set[str] = field(default_factory=set)
+    verified_columns: Set[str] = field(default_factory=set)
+    unverified_columns: Set[str] = field(default_factory=set)
+    notes: List[str] = field(default_factory=list)
+    warnings: List[str] = field(default_factory=list)
 
 
 class CTEDependencyValidator:
@@ -18,21 +32,34 @@ class CTEDependencyValidator:
         cls,
         plan: LogicPlan,
         available_base_tables: Optional[Set[str]] = None,
-    ) -> None:
+        table_columns_map: Optional[Dict[str, Set[str]]] = None,
+    ) -> ValidationReport:
         """Validates the complete LogicPlan against dependency, ordering, and AST constraints.
 
         Args:
             plan: The LogicPlan to validate.
             available_base_tables: Optional set of allowable base tables from the database schema.
+            table_columns_map: Optional mapping of base table names to sets of known column names.
+
+        Returns:
+            ValidationReport detailing verified tables, columns, and analytical notes.
 
         Raises:
             DependencyValidationError: If dependencies, references, or columns fail validation.
             PlanValidationError: If the plan violates structural or AST requirements.
         """
+        report = ValidationReport(is_valid=False)
+
         if not plan.cte_steps:
             # If no CTEs, validate final_select directly
-            cls._validate_final_select(plan.final_select, defined_ctes={}, available_base_tables=available_base_tables)
-            return
+            cls._validate_final_select(
+                plan.final_select,
+                defined_ctes=set(),
+                available_base_tables=available_base_tables,
+                report=report,
+            )
+            report.is_valid = True
+            return report
 
         # 1. Check CTE uniqueness
         cte_names: List[str] = []
@@ -61,7 +88,7 @@ class CTEDependencyValidator:
             except Exception as e:
                 raise PlanValidationError(
                     f"CTE '{step.step_name}' contains malformed SQL fragment: {e}"
-                )
+                ) from e
 
             if not isinstance(ast, exp.Select):
                 raise PlanValidationError(
@@ -70,10 +97,12 @@ class CTEDependencyValidator:
 
             # Inspect AST table references
             ast_tables = cls._extract_table_references(ast)
-            
+
             # Record columns produced for column verification
             cols_prod = {c.lower() for c in step.columns_produced if c != "*"}
             columns_produced_map[step_name] = cols_prod
+            for col in cols_prod:
+                report.verified_columns.add(f"{step_name}.{col}")
 
             # Check each referenced table in AST
             for tbl in ast_tables:
@@ -95,6 +124,7 @@ class CTEDependencyValidator:
                 # Check if it resolves to upstream CTE or allowable base table
                 if tbl_lower in upstream_available_ctes:
                     dep_graph[step_name].add(tbl_lower)
+                    report.verified_tables.add(tbl_lower)
                 elif available_base_tables is not None:
                     base_tables_lower = {b.lower() for b in available_base_tables}
                     if tbl_lower not in base_tables_lower:
@@ -103,6 +133,12 @@ class CTEDependencyValidator:
                             f"Available upstream CTEs: {sorted(upstream_available_ctes)}, "
                             f"Available base tables: {sorted(base_tables_lower)}"
                         )
+                    report.verified_tables.add(tbl_lower)
+                else:
+                    report.unverified_tables.add(tbl_lower)
+                    report.notes.append(
+                        f"Table '{tbl}' referenced in CTE '{step.step_name}' could not be verified against base catalog (no catalog provided)."
+                    )
 
             # Check consistency with declared source_tables
             for src in step.source_tables:
@@ -113,7 +149,7 @@ class CTEDependencyValidator:
                     )
 
             # Check column availability from upstream CTEs if qualified
-            cls._validate_column_references(ast, columns_produced_map, current_cte=step.step_name)
+            cls._validate_column_references(ast, columns_produced_map, current_cte=step.step_name, report=report)
 
         # 3. Detect cyclic dependencies across the CTE graph
         cls._detect_cycles(dep_graph)
@@ -124,14 +160,17 @@ class CTEDependencyValidator:
             defined_ctes=set(cte_names),
             available_base_tables=available_base_tables,
             columns_produced_map=columns_produced_map,
+            report=report,
         )
+
+        report.is_valid = True
+        return report
 
     @classmethod
     def _extract_table_references(cls, ast: exp.Expression) -> Set[str]:
-        """Extracts table and CTE relation names referenced in a query AST, ignoring aliases and CTE definitions."""
+        """Extracts table and CTE relation names referenced in a query AST, ignoring aliases."""
         tables = set()
         for tbl in ast.find_all(exp.Table):
-            # If the table expression is an alias or part of a subquery/unnest alias, skip
             if tbl.name:
                 tables.add(tbl.name)
         return tables
@@ -142,6 +181,7 @@ class CTEDependencyValidator:
         ast: exp.Expression,
         columns_produced_map: Dict[str, Set[str]],
         current_cte: str,
+        report: Optional[ValidationReport] = None,
     ) -> None:
         """Validates that explicit qualified column references (e.g. cte.col) exist in upstream CTE columns_produced."""
         for col_expr in ast.find_all(exp.Column):
@@ -150,12 +190,13 @@ class CTEDependencyValidator:
 
             if table_qualifier and table_qualifier in columns_produced_map:
                 produced = columns_produced_map[table_qualifier]
-                # If upstream specified explicit columns (and not empty / wildcard)
                 if produced and col_name not in produced:
                     raise DependencyValidationError(
                         f"In CTE '{current_cte}', qualified column reference '{table_qualifier}.{col_name}' "
                         f"was not found in columns produced by upstream CTE '{table_qualifier}': {sorted(produced)}"
                     )
+                if report and col_name in produced:
+                    report.verified_columns.add(f"{table_qualifier}.{col_name}")
 
     @classmethod
     def _detect_cycles(cls, graph: Dict[str, Set[str]]) -> None:
@@ -183,19 +224,19 @@ class CTEDependencyValidator:
         defined_ctes: Set[str],
         available_base_tables: Optional[Set[str]] = None,
         columns_produced_map: Optional[Dict[str, Set[str]]] = None,
+        report: Optional[ValidationReport] = None,
     ) -> None:
         """Validates the final SELECT projection."""
         try:
             ast = sqlglot.parse_one(final_select, read="duckdb")
         except Exception as e:
-            raise PlanValidationError(f"final_select contains malformed SQL: {e}")
+            raise PlanValidationError(f"final_select contains malformed SQL: {e}") from e
 
         if not isinstance(ast, exp.Select):
             raise PlanValidationError(
                 f"final_select must be a SELECT statement, got {type(ast).__name__}."
             )
 
-        # Check table references in final_select
         tables = cls._extract_table_references(ast)
         for tbl in tables:
             tbl_lower = tbl.lower()
@@ -210,7 +251,11 @@ class CTEDependencyValidator:
                     f"final_select references unknown relation '{tbl}'. "
                     f"Available CTEs: {sorted(defined_ctes)}, Available base tables: {sorted(available_base_tables)}"
                 )
+            if report:
+                if is_in_ctes or is_in_base:
+                    report.verified_tables.add(tbl_lower)
+                else:
+                    report.unverified_tables.add(tbl_lower)
 
-        # Check column references in final_select if columns_produced_map is provided
         if columns_produced_map:
-            cls._validate_column_references(ast, columns_produced_map, current_cte="final_select")
+            cls._validate_column_references(ast, columns_produced_map, current_cte="final_select", report=report)

@@ -51,3 +51,14 @@ class UnsupportedDialectError(SQLCompilationError):
 class SecurityValidationError(SQLCompilationError):
     """Raised when SQL violates statement security constraints (e.g. DDL, DML, or multiple statements)."""
     pass
+
+
+class ExecutionError(Text2SQLError):
+    """Raised when query execution on the target database engine fails."""
+    pass
+
+
+class RetrieverError(Text2SQLError):
+    """Raised when schema or value retrieval fails or receives invalid metadata."""
+    pass
+

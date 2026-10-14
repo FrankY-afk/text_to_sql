@@ -238,6 +238,7 @@ class LogicPlanner:
         dialect: str = "duckdb",
         matched_literals: Optional[Dict[str, str]] = None,
         available_base_tables: Optional[Set[str]] = None,
+        repair_context: Optional[str] = None,
     ) -> LogicPlan:
         """Deconstructs the user query into a verified LogicPlan with CTE steps."""
         dialect = normalize_dialect(dialect)
@@ -251,6 +252,13 @@ class LogicPlanner:
         if matched_literals:
             literals_info = "\nDiscovered Database Literals:\n" + "\n".join(
                 f"- Entity '{k}' maps to literal filter: {v}" for k, v in matched_literals.items()
+            )
+
+        repair_section = ""
+        if repair_context:
+            repair_section = (
+                f"\nPREVIOUS ATTEMPT FAILED WITH ERROR:\n{repair_context}\n"
+                f"You MUST address and fix this specific failure in the revised CTE plan.\n"
             )
 
         # Extract base tables from schema_context if not explicitly provided
@@ -269,7 +277,7 @@ TARGET DIALECT: {dialect}
 DIALECT-SPECIFIC FUNCTION GUIDELINES:
 {dialect_notes}
 {literals_info}
-
+{repair_section}
 SCHEMA CONTEXT:
 {schema_context}
 
@@ -358,6 +366,16 @@ RULES:
         except Exception as e:
             raise PlanGenerationError(f"Inference or planning error for query '{user_query}': {e}") from e
 
-    def compile_sql(self, logic_plan: LogicPlan, target_dialect: Optional[str] = None) -> str:
+    def compile_sql(
+        self,
+        logic_plan: LogicPlan,
+        target_dialect: Optional[str] = None,
+        source_dialect: Optional[str] = None,
+    ) -> str:
         """Compiles validated LogicPlan into target SQL dialect using SQLCompiler."""
-        return self.compiler.compile(logic_plan, target_dialect=target_dialect)
+        return self.compiler.compile(
+            logic_plan,
+            target_dialect=target_dialect,
+            source_dialect=source_dialect,
+        )
+

@@ -460,14 +460,63 @@ def get_llm(
             temperature=temperature,
         )
 
+def is_valid_token(token: Optional[str]) -> bool:
+    """Checks whether a token string is present and not a template placeholder."""
+    if not token:
+        return False
+    t = token.strip().lower()
+    if t in ("", "none", "null", "hf_placeholder_token_do_not_commit", "your_token_here") or "placeholder" in t:
+        return False
+    return True
+
+
+def get_llm(
+    backend: Optional[str] = None,
+    temperature: float = 0.0,
+) -> BaseChatModel:
+    """Explicitly initializes and returns the configured LLM backend.
+
+    Args:
+        backend: Explicit backend name override ('mock', 'ollama', 'huggingface', 'auto').
+        temperature: Sampling temperature for generation.
+
+    Returns:
+        BaseChatModel instance.
+
+    Raises:
+        ModelUnavailableError: If requested real model or server is not reachable.
+        ConfigurationError: If required tokens/settings are missing.
+    """
+    settings = get_settings()
+    target_backend = (backend or settings.llm_backend).lower().strip()
+
+    # 1. Explicit Mock Backend (Test-Only)
+    if target_backend == "mock":
+        return DeterministicMockCoder()
+
+    # 2. Explicit Ollama Backend
+    if target_backend == "ollama":
+        if not check_ollama_availability(settings.ollama_base_url, settings.ollama_model):
+            raise ModelUnavailableError(
+                f"Ollama backend requested, but server at '{settings.ollama_base_url}' is not reachable. "
+                f"Please start Ollama (`ollama serve`) and ensure '{settings.ollama_model}' is pulled."
+            )
+        return OllamaCoder(
+            model_name=settings.ollama_model,
+            base_url=settings.ollama_base_url,
+            temperature=temperature,
+        )
+
     # 3. Explicit Hugging Face Backend
     if target_backend == "huggingface":
-        token = settings.hf_api_token or os.environ.get("HUGGINGFACEHUB_API_TOKEN") or os.environ.get("HF_TOKEN")
+        raw_token = settings.hf_api_token or os.environ.get("HUGGINGFACEHUB_API_TOKEN") or os.environ.get("HF_TOKEN")
+        token = raw_token if is_valid_token(raw_token) else None
         if not token:
             raise ConfigurationError(
                 "Hugging Face backend requested, but no API token provided. "
                 "Set TEXT2SQL_HF_API_TOKEN or HF_TOKEN environment variable."
             )
+
         try:
             from langchain_huggingface import ChatHuggingFace, HuggingFaceEndpoint
             endpoint = HuggingFaceEndpoint(
@@ -492,8 +541,9 @@ def get_llm(
                 temperature=temperature,
             )
 
-        # Check Hugging Face token
-        token = settings.hf_api_token or os.environ.get("HUGGINGFACEHUB_API_TOKEN") or os.environ.get("HF_TOKEN")
+        # Check Hugging Face token (only if not a placeholder)
+        raw_token = settings.hf_api_token or os.environ.get("HUGGINGFACEHUB_API_TOKEN") or os.environ.get("HF_TOKEN")
+        token = raw_token if is_valid_token(raw_token) else None
         if token:
             try:
                 from langchain_huggingface import ChatHuggingFace, HuggingFaceEndpoint
@@ -518,6 +568,7 @@ def get_llm(
 
         # In development / test mode, use the explicit test mock
         return DeterministicMockCoder()
+
 
     raise ConfigurationError(
         f"Unknown LLM backend '{target_backend}'. Allowed backends: 'auto', 'ollama', 'huggingface', 'mock'."

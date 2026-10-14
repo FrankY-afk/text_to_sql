@@ -276,3 +276,39 @@ class SchemaFlattener:
             lines.append(f"    - {f.path} ({f.data_type}){flag_str}{desc}")
 
         return "\n".join(lines)
+
+    @classmethod
+    def get_dialect_unnest_expression(cls, field: FlattenedField, dialect: str) -> Optional[str]:
+        """Returns the dialect-specific array unnesting / lateral flatten SQL clause.
+
+        Architectural Note:
+            Schema flattening produces dot-notation paths and identifies array unnest requirements.
+            Flattening a schema alone does NOT automatically execute dialect-specific array unnesting.
+            Dialect-specific SQL generation requires explicit syntax transformations handled here
+            or within dialect-specific query planning.
+
+        Args:
+            field: FlattenedField with is_array=True.
+            dialect: Target SQL dialect ('duckdb', 'bigquery', 'snowflake', 'postgres').
+
+        Returns:
+            SQL fragment string for unnesting, or None if the field is not an array.
+        """
+        if not field.is_array or not field.parent_array_path:
+            return None
+
+        d = dialect.lower().strip()
+        arr_path = field.parent_array_path
+        alias = field.root_column
+
+        if d in ("duckdb", "sqlite"):
+            return f"UNNEST({arr_path}) AS t({alias})"
+        elif d == "bigquery":
+            return f"CROSS JOIN UNNEST({arr_path}) AS {alias}"
+        elif d == "snowflake":
+            return f", LATERAL FLATTEN(input => {arr_path}) AS {alias}"
+        elif d in ("postgres", "postgresql"):
+            return f"CROSS JOIN json_array_elements({arr_path}) AS {alias}"
+        else:
+            return f"UNNEST({arr_path}) AS {alias}"
+
