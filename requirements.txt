@@ -12,5 +12,11 @@ python-dotenv>=1.0.0
 # SQL AST Parsing & Dialect Validation
 sqlglot>=26.0.0
 
+# Hugging Face LLM Inference
+huggingface-hub>=0.20.0
+
+# Terminal UI & Formatting
+rich>=13.0.0
+
 # Automated Testing
 pytest>=8.0.0

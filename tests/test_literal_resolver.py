@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import pytest
 from src.literal_resolver import LiteralResolver
+from tests.conftest import postgres_required
 
 
 @pytest.fixture
@@ -31,10 +32,12 @@ def test_resolve_tier_abbreviations(resolver):
     assert resolved_map.get("tier 2") == "T2"
 
 
+@postgres_required
 def test_resolve_live_state_literals(resolver):
     """Verifies that live PostgreSQL states are matched case-insensitively."""
     text = "Find all outlets in telangana state."
     matches = resolver.resolve_literals(text)
+
 
     state_matches = [m for m in matches if m.column_name == "state_name"]
     assert len(state_matches) >= 1

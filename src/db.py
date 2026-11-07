@@ -1,11 +1,4 @@
-"""Database connection manager, session safety enforcer, and cursor utilities.
-
-Connects to PostgreSQL using psycopg2, enforces read-only session flags,
-applies query statement timeouts, and formats query results into structured dictionaries.
-"""
-
 from __future__ import annotations
-
 import logging
 import sqlite3
 from contextlib import contextmanager
@@ -34,7 +27,7 @@ def create_postgres_connection(settings: Optional[Settings] = None) -> PgConnect
 
     try:
         conn = psycopg2.connect(**conn_dict)
-        conn.autocommit = True  # Read-only queries do not need uncommitted transaction blocks
+        conn.autocommit = True  
 
         # Session safety initialization
         with conn.cursor() as cur:
@@ -88,17 +81,7 @@ def execute_readonly_query(
     max_rows: Optional[int] = None,
     settings: Optional[Settings] = None,
 ) -> Dict[str, Any]:
-    """Executes a read-only query and returns column metadata, rows, and row count.
-    
-    Args:
-        sql: The SQL query string to execute.
-        params: Optional tuple of parameters for parameterized queries.
-        max_rows: Maximum rows to return (defaults to Settings.max_row_limit).
-        settings: Optional Settings override.
-
-    Returns:
-        A dictionary with 'columns', 'rows', 'row_count', and 'truncated' status.
-    """
+   
     cfg = settings or get_settings()
     limit = max_rows or cfg.max_row_limit
 

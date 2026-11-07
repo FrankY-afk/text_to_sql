@@ -10,8 +10,10 @@ from src.db import (
     get_local_db_connection,
     test_connection as check_db_connection,
 )
+from tests.conftest import postgres_required
 
 
+@postgres_required
 def test_postgres_live_connection():
     """Verifies that live PostgreSQL connection succeeds and returns valid metadata."""
     settings = get_settings()
@@ -23,6 +25,7 @@ def test_postgres_live_connection():
     assert "PostgreSQL" in info["version"]
 
 
+@postgres_required
 def test_postgres_readonly_session_settings():
     """Verifies that the session enforces statement timeouts and search path."""
     with get_db_cursor() as cur:
@@ -37,9 +40,11 @@ def test_postgres_readonly_session_settings():
         assert read_only == "on"
 
 
+@postgres_required
 def test_postgres_execute_readonly_query_bounded():
     """Verifies that execute_readonly_query respects row bounds and returns dicts."""
     res = execute_readonly_query("SELECT outlet_code, state_name FROM outlets;", max_rows=5)
+
 
     assert len(res["rows"]) == 5
     assert res["row_count"] == 5

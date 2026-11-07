@@ -97,14 +97,21 @@ class LiteralResolver:
             return values
 
         # Live PostgreSQL
+        if getattr(self, "_db_unavailable", False):
+            return []
         sql = (
             f'SELECT DISTINCT "{column_name}" FROM "{table_name}" '
             f'WHERE "{column_name}" IS NOT NULL ORDER BY "{column_name}" LIMIT {limit};'
         )
-        res = execute_readonly_query(sql)
-        values = [str(r[column_name]) for r in res.get("rows", []) if r.get(column_name) is not None]
-        self._cache[cache_key] = values
-        return values
+        try:
+            res = execute_readonly_query(sql)
+            values = [str(r[column_name]) for r in res.get("rows", []) if r.get(column_name) is not None]
+            self._cache[cache_key] = values
+            return values
+        except Exception:
+            self._db_unavailable = True
+            return []
+
 
     def resolve_literals(self, user_text: str) -> List[LiteralMatch]:
         """Scans user text and returns grounded database literals."""

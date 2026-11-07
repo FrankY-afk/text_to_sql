@@ -23,6 +23,8 @@ def test_valid_select_queries_allowed():
     assert "users" in report.tables_referenced
     assert "activity_events" in report.tables_referenced
     assert report.has_distinct is True
+    assert report.has_ctes is True
+    assert "cohort" in report.cte_names
 
 
 @pytest.mark.parametrize(
@@ -59,3 +61,27 @@ def test_dangerous_system_functions_blocked():
     report = validate_readonly_sql(func_sql)
     assert report.is_valid is False
     assert "forbidden system function" in (report.error or "")
+
+
+def test_dialect_violations_blocked():
+    """Verifies that dialect-forbidden syntax (QUALIFY on Postgres) is blocked."""
+    bad_qualify = "SELECT user_id FROM users QUALIFY ROW_NUMBER() OVER (ORDER BY signup_date) = 1;"
+    report = validate_readonly_sql(bad_qualify, dialect="postgres")
+    assert report.is_valid is False
+    assert any("QUALIFY" in v for v in report.dialect_violations)
+
+
+def test_cte_forward_reference_in_sql_detected():
+    """Verifies that CTE forward references inside raw SQL are detected."""
+    bad_cte_sql = """
+    WITH step1 AS (
+        SELECT * FROM step2
+    ),
+    step2 AS (
+        SELECT 1 AS val
+    )
+    SELECT * FROM step1;
+    """
+    report = validate_readonly_sql(bad_cte_sql, dialect="postgres")
+    assert report.is_valid is False
+    assert "forward-reference" in (report.error or "")
