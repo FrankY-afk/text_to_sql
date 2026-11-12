@@ -1,9 +1,11 @@
-"""Text-to-SQL Problem 1: Erroneous Data Analysis Package.
+"""Text-to-SQL Problem 1 & Problem 2 Enterprise Package.
 
-A system built with PostgreSQL, Model Context Protocol (MCP), and semantic validation
-to detect and prevent logically erroneous data analysis in SQL queries.
+A system built with PostgreSQL, DuckDB, Model Context Protocol (MCP), Two-Stage Schema Linking,
+CTE Planning, Dialect RAG, and semantic validation to prevent erroneous data analysis (Problem 1)
+and wrong schema linking (Problem 2).
 """
 
+from src.column_retriever import ColumnCandidate, ColumnRetriever
 from src.cte_planner import (
     CTEDependencyValidator,
     CTEPlanCompiler,
@@ -22,8 +24,15 @@ from src.dialect_rag import (
     DialectFunctionRAG,
     DialectFunctionSpec,
 )
+from src.schema_context_builder import (
+    EnterpriseSchemaRetriever,
+    SchemaContext,
+    SchemaContextBuilder,
+)
+from src.schema_flattener import FlattenedField, SchemaFlattener
+from src.table_retriever import TableCandidate, TableRetriever
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 __all__ = [
     "CTEPlanStep",
@@ -38,6 +47,15 @@ __all__ = [
     "ExecutionGroundedDebugger",
     "ErrorCategory",
     "DebuggedExecutionResult",
+    "TableCandidate",
+    "TableRetriever",
+    "ColumnCandidate",
+    "ColumnRetriever",
+    "FlattenedField",
+    "SchemaFlattener",
+    "SchemaContext",
+    "SchemaContextBuilder",
+    "EnterpriseSchemaRetriever",
 ]
 
 

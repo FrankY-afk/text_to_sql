@@ -1,6 +1,8 @@
-# Text-to-SQL Problem 1: Erroneous Data Analysis Using MCP, PostgreSQL & Hugging Face
+# Enterprise Text-to-SQL Using MCP, PostgreSQL, Two-Stage Schema Linking & Hugging Face
 
-An enterprise-grade Text-to-SQL system built using the **Model Context Protocol (MCP)**, **PostgreSQL**, and open-source **Hugging Face** models, dedicated to eliminating **Problem 1: Erroneous Data Analysis (35.5% of real-world Spider 2.0 benchmark errors)**.
+An enterprise-grade Text-to-SQL system built using the **Model Context Protocol (MCP)**, **PostgreSQL**, **DuckDB**, **ChromaDB + BGE Embeddings**, and open-source **Hugging Face** models, targeting two core Spider 2.0 failure categories:
+- **Problem 1: Erroneous Data Analysis (35.5% of Spider 2.0 errors)** — structured CTE Logic Planner, Dialect Function RAG, SQLGlot AST & Semantic Validation, Execution-Grounded Debugger.
+- **Problem 2: Enterprise Schema Linking (27.6% of Spider 2.0 errors)** — Two-Stage Schema Retriever (Coarse Table + Fine Column), Nested Schema Tree Flattener (`STRUCT`/`ARRAY`/`JSON`), DB-Evidenced Distinct Value Indexer, and Schema Context Builder.
 
 ---
 
@@ -54,21 +56,25 @@ flowchart TD
 text2SQL-MCP/
 ├── src/
 │   ├── __init__.py            # Package root & exposed modules
-│   ├── config.py              # Pydantic Settings with Hugging Face & PostgreSQL config
+│   ├── config.py              # Pydantic Settings (PostgreSQL, HF, BGE embeddings & ChromaDB)
 │   ├── db.py                  # PostgreSQL connection factory (60s timeout & read-only session) + SQLite
-│   ├── schema_inspector.py    # Schema cards in Markdown & bounded row sampling via MCP
-│   ├── literal_resolver.py    # Categorical Literal Grounding (abbreviations & live distinct values)
-│   ├── dialect_rag.py         # Dialect Function RAG (PostgreSQL, DuckDB, BigQuery, Snowflake rules)
-│   ├── cte_planner.py         # Structured CTE Logic Planner (Pydantic DAG models & compiler)
+│   ├── schema_inspector.py    # Multi-schema inspector (PostgreSQL, DuckDB, SQLite), PK/FK & sample rows
+│   ├── table_retriever.py     # Stage 1 Coarse Table Retriever (BGE + ChromaDB, multi-schema, refresh)
+│   ├── column_retriever.py    # Stage 2 Fine-Grained Column & Nested Field Retriever (PK/FK preserved)
+│   ├── schema_flattener.py    # Stage 3 Nested Schema Tree Flattener (STRUCT, ARRAY, JSON/JSONB)
+│   ├── literal_resolver.py    # Stage 4 DB-Evidenced Distinct Value Indexer & Categorical Resolver
+│   ├── schema_context_builder.py # Stage 5 Pruned SchemaContext Builder & EnterpriseSchemaRetriever
+│   ├── dialect_rag.py         # Dialect Function RAG (PostgreSQL, DuckDB, BigQuery, Snowflake, SQLite)
+│   ├── cte_planner.py         # Structured CTE Logic Planner (schema-linked DAG models & compiler)
 │   ├── hf_client.py           # Hugging Face Inference API / Dedicated Endpoint Client
 │   ├── sql_validator.py       # SQLGlot AST security, DDL/DML rejection, and dialect gates
 │   ├── semantic_validator.py  # Diagnoses business logic pitfalls (grain, join leaks, fan-out, bounds)
 │   ├── debugger.py            # Execution-grounded debugging loop with error classification & repair
-│   ├── sql_generator.py       # Assembles schema, plan, dialect context, and Hugging Face generation
-│   ├── mcp_server.py          # Official Anthropic MCP Server with 6 database tools
+│   ├── sql_generator.py       # Integrates Two-Stage Schema Linking, CTE Planner, RAG & HF generation
+│   ├── mcp_server.py          # Official MCP Server with 8 database & schema-linking tools
 │   ├── query_executor.py      # Official MCP Client layer wrapping tool invocation
-│   ├── evaluator.py           # Evaluator for 10 Spider 2.0 analytical failure modes
-│   └── cli.py                 # Interactive Rich terminal REPL
+│   ├── evaluator.py           # Problem 1 (10 failure modes) & Problem 2 (7 retrieval metrics) Evaluators
+│   └── cli.py                 # Interactive Rich terminal REPL (Problem 1 + Problem 2 evaluation)
 ├── scripts/
 │   ├── inspect_database.py    # Schema inspector utility for PostgreSQL
 │   ├── seed_test_data.py      # Populates the 120-user January/February retention benchmark
@@ -82,8 +88,11 @@ text2SQL-MCP/
 │   ├── test_problem1_regression.py # 10-test Spider 2.0 benchmark suite measuring execution vs analytical correctness
 │   ├── test_sql_validator.py  # AST checks rejecting DDL, DML, multi-statements, and dialect violations
 │   ├── test_semantic_analysis.py # Semantic tests for grain, filter leaks, fan-out, and bounds
-│   ├── test_mcp_tools.py      # Tests discovery and execution of all 6 MCP tools
+│   ├── test_mcp_tools.py      # Tests discovery and execution of MCP tools
 │   ├── test_literal_resolver.py # Tests categorical literal resolution
+│   ├── test_schema_flattener.py # Tests STRUCT/ARRAY/JSON flattening & live DuckDB UNNEST semantics
+│   ├── test_schema_linking.py   # Tests Two-Stage retrieval, DB-evidenced literals, BGE & MCP integration
+│   ├── test_problem2_eval.py    # Tests 7 Stage-7 retrieval metrics, 250+ columns & live schema refresh
 │   └── test_db_connection.py  # Live PostgreSQL and local SQLite connectivity tests
 ├── .env.example               # Sanitized template with PostgreSQL and Hugging Face settings
 ├── requirements.txt           # Verified dependencies (mcp, sqlglot, huggingface-hub, psycopg2, pydantic, rich, pytest)
@@ -194,3 +203,14 @@ Runs 69 automated tests verifying:
 8. **Percentile Calculations**: Employs dialect-specific percentile functions (`percentile_cont(...) WITHIN GROUP (ORDER BY ...)`).
 9. **Date & Time-Window Boundaries**: Uses half-open intervals `[start, end)` (`col >= '2024-01-01' AND col < '2024-02-01'`) to avoid end-of-day timestamp omissions.
 10. **Dialect-Specific Function Differences**: Uses Dialect Function RAG to guide the LLM and block dialect-incompatible functions (`QUALIFY` on PostgreSQL, argument inversion in `DATE_DIFF`).
+
+---
+
+## 8. Problem 2: Two-Stage Enterprise Schema Linking Architecture
+
+1. **Stage 1 — Coarse Table Retrieval (`src/table_retriever.py`)**: Embeds table names, descriptions, PK/FK summaries, and column overviews into ChromaDB using `BAAI/bge-small-en-v1.5`, supporting multi-schema `where` filtering, normalized similarity scores, and `refresh_index()`.
+2. **Stage 2 — Fine-Grained Column & Nested Field Retrieval (`src/column_retriever.py`)**: Ranks columns and flattened subpaths strictly within Stage-1 candidate tables while automatically preserving Primary Keys and Foreign Keys (`preserved_as_key=True`).
+3. **Stage 3 — Nested Schema Tree Flattener (`src/schema_flattener.py`)**: Recursively parses BigQuery `STRUCT<...>` / `ARRAY<...>`, DuckDB `STRUCT(...)` / `[]`, and PostgreSQL `JSON` / `JSONB` payloads while marking non-selectable paths (`is_directly_queryable=False`) with dialect-specific access hints (`UNNEST`, `LATERAL FLATTEN`, `->>`, `json_extract`).
+4. **Stage 4 — DB-Evidenced Distinct Value Indexer (`src/literal_resolver.py`)**: Samples distinct database cell values via parameterized queries, resolves natural-language terms and abbreviations (e.g. `"California"` -> `'CA'`) only when backed by observed storage evidence (`require_db_evidence=True`), and validates identifiers before emitting predicates.
+5. **Stage 5 — Schema Context Builder (`src/schema_context_builder.py`)**: Prunes enterprise schemas (20+ tables / 250+ columns) down to a compact Markdown & structured `SchemaContext` fed directly to `CTEPlanner` and Hugging Face `SQLGenerator`.
+6. **Stage 6 & 7 — MCP Integration & Retrieval Evaluation (`src/mcp_server.py`, `src/evaluator.py`)**: Adds `get_table_relationships` and `retrieve_schema_context` MCP tools alongside `Problem2RetrievalEvaluator` measuring Table Recall@K, Column Recall@K, Precision@K, MRR, schema token reduction %, retrieval latency, and literal resolution accuracy.

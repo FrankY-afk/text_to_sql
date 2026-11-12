@@ -15,6 +15,13 @@ sqlglot>=26.0.0
 # Hugging Face LLM Inference
 huggingface-hub>=0.20.0
 
+# Vector Store & Local BGE Embeddings (Problem 2: Schema Linking)
+chromadb>=1.5.0
+sentence-transformers>=2.7.0
+
+# Embedded Analytical SQL Engine (DuckDB Nested Type Testing)
+duckdb>=1.0.0
+
 # Terminal UI & Formatting
 rich>=13.0.0
 

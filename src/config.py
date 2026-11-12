@@ -9,7 +9,7 @@ from __future__ import annotations
 import os
 from functools import lru_cache
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 from pydantic import AliasChoices, Field, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -79,6 +79,28 @@ class Settings(BaseSettings):
         description="Sampling temperature for LLM generation (0.0 for deterministic SQL)",
     )
 
+    # Embeddings & Vector Store Configuration (Problem 2: Enterprise Schema Linking)
+    embedding_model_name: str = Field(
+        default="BAAI/bge-small-en-v1.5",
+        description="BGE embedding model identifier for table, column, and literal retrieval",
+    )
+    embedding_device: str = Field(
+        default="cpu",
+        description="Device for embedding execution ('cpu' or 'cuda')",
+    )
+    chroma_db_dir: str = Field(
+        default=str(PROJECT_ROOT / "chroma_db"),
+        description="Persistent directory for ChromaDB vector indices",
+    )
+    schema_top_k_tables: int = Field(
+        default=5,
+        description="Default top-k candidate tables returned in Stage 1 Coarse Retrieval",
+    )
+    schema_top_k_columns: int = Field(
+        default=8,
+        description="Default top-k relevant columns returned per table in Stage 2 Retrieval",
+    )
+
     def get_hf_token(self) -> Optional[str]:
         """Resolves Hugging Face API key / token from settings or environment variables."""
         if self.hf_api_token:
@@ -130,6 +152,8 @@ class Settings(BaseSettings):
             "query_timeout_seconds": self.query_timeout_seconds,
             "max_row_limit": self.max_row_limit,
             "local_db_path": self.local_db_path,
+            "embedding_model_name": self.embedding_model_name,
+            "chroma_db_dir": self.chroma_db_dir,
         }
 
 
@@ -141,3 +165,142 @@ def get_settings() -> Settings:
 def reset_settings() -> None:
     """Clears the settings cache (useful during testing)."""
     get_settings.cache_clear()
+
+
+class DeterministicTokenEmbeddingFunction:
+    """Lightweight, deterministic token+character-ngram Chroma EmbeddingFunction.
+
+    Used as a fast zero-network fallback or unit-test embedder when SentenceTransformer
+    model weights cannot be loaded or when sub-millisecond unit test execution is desired.
+    Produces L2-normalized dense 384-d float vectors compatible with cosine similarity.
+    """
+
+    def __init__(self, dim: int = 384):
+        self.dim = dim
+
+    def __call__(self, input: List[str]) -> List[List[float]]:  # type: ignore[override]
+        import hashlib
+        import math
+        import re
+
+        vectors: List[List[float]] = []
+        for text in input:
+            vec = [0.0] * self.dim
+            lowered = str(text).lower()
+            tokens = re.findall(r"[a-z0-9]+", lowered)
+            # Split camelCase / snake_case sub-tokens plus bigrams & char trigrams
+            sub_tokens: List[str] = list(tokens)
+            for tok in tokens:
+                if len(tok) >= 3:
+                    for i in range(len(tok) - 2):
+                        sub_tokens.append(f"#{tok[i:i+3]}")
+            for idx in range(len(tokens) - 1):
+                sub_tokens.append(f"{tokens[idx]}_{tokens[idx+1]}")
+
+            for feat in sub_tokens:
+                digest = hashlib.blake2b(feat.encode("utf-8"), digest_size=8).digest()
+                h = int.from_bytes(digest, "little")
+                bucket = h % self.dim
+                sign = 1.0 if ((h >> 16) & 1) == 0 else -1.0
+                weight = 1.0 if not feat.startswith("#") else 0.35
+                vec[bucket] += sign * weight
+
+            norm = math.sqrt(sum(v * v for v in vec))
+            if norm > 0.0:
+                vec = [v / norm for v in vec]
+            else:
+                vec[0] = 1.0
+            vectors.append(vec)
+        return vectors
+
+    def embed_query(self, input: List[str]) -> List[List[float]]:
+        return self.__call__(input)
+
+    @staticmethod
+    def name() -> str:
+        return "deterministic_token_hash"
+
+    @staticmethod
+    def is_legacy() -> bool:
+        return False
+
+    def default_space(self) -> str:
+        return "cosine"
+
+    def supported_spaces(self) -> List[str]:
+        return ["cosine", "l2", "ip"]
+
+    def get_config(self) -> Dict[str, Any]:
+        return {"dim": self.dim}
+
+    @staticmethod
+    def build_from_config(config: Dict[str, Any]) -> "DeterministicTokenEmbeddingFunction":
+        return DeterministicTokenEmbeddingFunction(dim=int(config.get("dim", 384)))
+
+
+_bge_embedding_cache: Dict[str, Any] = {}
+
+
+def get_embedding_function(
+    settings: Optional[Settings] = None,
+    backend: str = "auto",
+) -> Any:
+    """Returns a ChromaDB-compatible EmbeddingFunction using the configured BGE model.
+
+    Args:
+        settings: Optional Settings instance.
+        backend: 'bge' (force BAAI/bge-small-en-v1.5), 'hash' (fast deterministic),
+                 or 'auto' (try BGE local cache / download, fall back to hash if offline).
+    """
+    cfg = settings or get_settings()
+    mode = backend.lower().strip()
+
+    if mode == "hash":
+        return DeterministicTokenEmbeddingFunction()
+
+    cache_key = f"{cfg.embedding_model_name}:{cfg.embedding_device}"
+    if cache_key in _bge_embedding_cache:
+        return _bge_embedding_cache[cache_key]
+
+    try:
+        from chromadb.utils.embedding_functions import SentenceTransformerEmbeddingFunction
+
+        # Prefer local cached model first to prevent network stalls when already cached
+        try:
+            ef = SentenceTransformerEmbeddingFunction(
+                model_name=cfg.embedding_model_name,
+                device=cfg.embedding_device,
+                normalize_embeddings=True,
+                local_files_only=True,
+            )
+        except Exception:
+            if mode == "bge":
+                ef = SentenceTransformerEmbeddingFunction(
+                    model_name=cfg.embedding_model_name,
+                    device=cfg.embedding_device,
+                    normalize_embeddings=True,
+                )
+            else:
+                raise
+        _bge_embedding_cache[cache_key] = ef
+        return ef
+    except Exception as exc:
+        if mode == "bge":
+            raise RuntimeError(f"Failed to load BGE embedding model '{cfg.embedding_model_name}': {exc}") from exc
+        return DeterministicTokenEmbeddingFunction()
+
+
+def get_chroma_client(
+    persist_directory: Optional[str] = None,
+    in_memory: bool = False,
+    settings: Optional[Settings] = None,
+) -> Any:
+    """Initializes and returns a ChromaDB PersistentClient or EphemeralClient."""
+    import chromadb
+
+    if in_memory:
+        return chromadb.EphemeralClient()
+    cfg = settings or get_settings()
+    target_dir = persist_directory or cfg.chroma_db_dir
+    os.makedirs(target_dir, exist_ok=True)
+    return chromadb.PersistentClient(path=target_dir)

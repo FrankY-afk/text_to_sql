@@ -20,6 +20,7 @@ from src.dialect_rag import DialectFunctionRAG
 from src.hf_client import HuggingFaceClient
 from src.literal_resolver import LiteralResolver
 from src.query_executor import MCPQueryExecutor
+from src.schema_context_builder import EnterpriseSchemaRetriever, SchemaContext
 from src.schema_inspector import SchemaInspector
 from src.semantic_validator import AnalyticalContract
 
@@ -36,20 +37,83 @@ class GenerationResult(BaseModel):
     explanation: str = Field(description="Explanation of math logic, grain, and assumptions")
     target_database: str = Field(default="postgres", description="'postgres' or 'local'")
     logic_plan: Optional[LogicPlan] = Field(default=None, description="Structured CTE logic plan if generated")
+    schema_context: Optional[SchemaContext] = Field(
+        default=None,
+        description="Two-stage linked schema context (selected tables, columns, joins, nested hints, literals)",
+    )
 
 
 class SQLGenerator:
-    """Generates SQL queries informed by MCP schema inspection, dialect RAG, and analytical CTE plans."""
+    """Generates SQL queries informed by MCP schema inspection, two-stage schema linking, dialect RAG, and analytical CTE plans."""
 
     def __init__(
         self,
         executor: Optional[MCPQueryExecutor] = None,
         hf_client: Optional[HuggingFaceClient] = None,
+        schema_retriever: Optional[EnterpriseSchemaRetriever] = None,
+        embedding_backend: str = "auto",
     ):
         self.executor = executor or MCPQueryExecutor()
         self.planner = CTEPlanner()
         self.dialect_rag = DialectFunctionRAG()
         self.hf_client = hf_client or HuggingFaceClient()
+        self.schema_retriever = schema_retriever
+        self.embedding_backend = embedding_backend
+        self._retriever_cache: Dict[str, EnterpriseSchemaRetriever] = {}
+
+    def refresh_schema_index(self, target: str = "postgres") -> None:
+        """Clears cached retriever for a target database so next query re-indexes live schema."""
+        key = target.lower().strip()
+        self._retriever_cache.pop(key, None)
+
+    def get_schema_context(
+        self,
+        question: str,
+        target: str = "postgres",
+        top_k_tables: Optional[int] = None,
+        top_k_columns_per_table: Optional[int] = None,
+        refresh: bool = False,
+    ) -> Optional[SchemaContext]:
+        """Runs Two-Stage Enterprise Schema Linking to retrieve pruned tables, columns, keys, and literals."""
+        tgt_key = target.lower().strip()
+        dialect = "sqlite" if tgt_key in ("local", "sqlite") else tgt_key
+
+        if self.schema_retriever is not None:
+            return self.schema_retriever.retrieve_schema_context(
+                query=question,
+                top_k_tables=top_k_tables,
+                top_k_columns_per_table=top_k_columns_per_table,
+                target_dialect=dialect,
+                require_db_evidence_for_literals=True,
+            )
+
+        try:
+            retriever = self._retriever_cache.get(tgt_key)
+            if retriever is None or refresh:
+                safe_suffix = re.sub(r"[^a-z0-9_]", "_", tgt_key)
+                retriever = EnterpriseSchemaRetriever(
+                    in_memory=True,
+                    embedding_backend=self.embedding_backend,
+                    collection_prefix=f"sqlgen_{safe_suffix}",
+                )
+                inspector = SchemaInspector(target=target)
+                retriever.index_from_inspector(
+                    inspector=inspector,
+                    clear_existing=True,
+                    index_distinct_values=True,
+                )
+                self._retriever_cache[tgt_key] = retriever
+
+            return retriever.retrieve_schema_context(
+                query=question,
+                top_k_tables=top_k_tables,
+                top_k_columns_per_table=top_k_columns_per_table,
+                target_dialect=dialect,
+                require_db_evidence_for_literals=True,
+            )
+        except Exception as exc:
+            logger.debug("Two-stage schema linking unavailable for target '%s': %s", target, exc)
+            return None
 
     def decompose_question(self, question: str) -> Tuple[AnalyticalContract, str]:
         """Extracts the analytical contract and target database from natural language."""
@@ -385,36 +449,54 @@ MANDATORY RULES:
         """Generates a Semantically Guarded SQL query protecting grain, denominators, and safe math.
 
         Execution Flow:
-        1. Decomposes question into AnalyticalContract and structured CTE LogicPlan.
-        2. Retrieves relevant table schemas via MCP / SchemaInspector.
-        3. Grounds categorical literals via MCP / LiteralResolver.
+        1. Two-Stage Enterprise Schema Linking (coarse table + fine column + nested fields + literals).
+        2. Decomposes question into AnalyticalContract and schema-grounded CTE LogicPlan.
+        3. Grounds categorical literals with database evidence.
         4. Retrieves dialect-specific functions and syntax constraints via DialectFunctionRAG.
-        5. If Hugging Face is configured, invokes the Hugging Face model with full context.
+        5. If Hugging Face is configured, invokes the Hugging Face model with compact SchemaContext.
         6. Falls back to compiling the validated CTE LogicPlan into verified SQL.
         """
         contract, detected_target = self.decompose_question(question)
         final_target = target or detected_target
-        dialect = "sqlite" if final_target == "local" else "postgres"
+        tgt_lower = final_target.lower().strip()
+        dialect = "sqlite" if tgt_lower in ("local", "sqlite") else ("duckdb" if tgt_lower == "duckdb" else "postgres")
 
-        # Step 1: Decompose into structured CTE Logic Plan
-        plan = self.planner.plan_question(question, target_dialect=dialect)
+        # Step 1: Two-Stage Schema Linking (compact, pruned schema context)
+        retrieved_schema = self.get_schema_context(question, target=final_target)
+        schema_context_text = (
+            retrieved_schema.rendered_markdown
+            if retrieved_schema and retrieved_schema.rendered_markdown
+            else ""
+        )
 
-        # Step 2: Retrieve schema context via MCP
-        inspector = SchemaInspector(target=final_target)
-        try:
-            tables = inspector.get_table_names()
-            schema_cards = [inspector.get_schema_card(t) for t in tables[:4]]
-            schema_context = "\n\n".join(schema_cards)
-        except Exception:
-            schema_context = ""
+        # Step 2: Decompose into structured CTE Logic Plan grounded in linked schema
+        plan = self.planner.plan_question(
+            question,
+            target_dialect=dialect,
+            schema_context=retrieved_schema,
+        )
 
-        # Step 3: Literal grounding via MCP
-        resolver = LiteralResolver(target=final_target)
-        literal_context = resolver.generate_grounding_prompt_hint(question)
+        # Step 3: Literal grounding (prefer DB-evidenced matches from SchemaContext, fallback to offline domain resolver)
+        if retrieved_schema and retrieved_schema.resolved_literals:
+            lit_lines = [
+                "[Discovered Database Literals (DB-Evidenced)]",
+                *[
+                    f"- '{m.term}' -> {m.table_name}.{m.column_name}: {m.sql_predicate} "
+                    f"(confidence={m.confidence:.2f}, evidence={m.evidence})"
+                    for m in retrieved_schema.resolved_literals
+                ],
+            ]
+            literal_context = "\n".join(lit_lines)
+        else:
+            resolver = LiteralResolver(target=final_target)
+            literal_context = resolver.generate_grounding_prompt_hint(question)
 
-        # Step 4: Dialect Function RAG
+        # Step 4: Dialect Function RAG (including nested STRUCT/ARRAY/JSON access rules when applicable)
+        rag_query = f"{question} {plan.strategy}"
+        if retrieved_schema and retrieved_schema.nested_field_hints:
+            rag_query += " nested struct array json unnest"
         dialect_context = self.dialect_rag.format_prompt_context(
-            f"{question} {plan.strategy}",
+            rag_query,
             target_dialect=dialect,
         )
 
@@ -426,7 +508,7 @@ MANDATORY RULES:
                     question=question,
                     target_dialect=dialect,
                     plan=plan,
-                    schema_context=schema_context,
+                    schema_context=schema_context_text,
                     literal_context=literal_context,
                     dialect_context=dialect_context,
                 )
@@ -443,6 +525,7 @@ MANDATORY RULES:
                     explanation=explanation,
                     target_database=final_target,
                     logic_plan=plan,
+                    schema_context=retrieved_schema,
                 )
             except Exception as exc:
                 logger.warning("Hugging Face inference error, falling back to verified CTE compiler: %s", exc)
@@ -462,4 +545,5 @@ MANDATORY RULES:
             explanation=explanation,
             target_database=final_target,
             logic_plan=plan,
+            schema_context=retrieved_schema,
         )

@@ -647,10 +647,11 @@ class CTEPlanner:
         self,
         question: str,
         target_dialect: Optional[str] = None,
+        schema_context: Optional[Any] = None,
     ) -> LogicPlan:
         """Main routing method to generate an analytical CTE LogicPlan for a question."""
         q_lower = question.lower()
-        dialect = target_dialect or self.target_dialect
+        dialect = normalize_dialect(target_dialect or self.target_dialect)
 
         if "retention" in q_lower or ("signup" in q_lower and "return" in q_lower) or ("january" in q_lower and "february" in q_lower):
             return self.create_cohort_retention_plan(question, target_dialect=dialect)
@@ -694,6 +695,100 @@ class CTEPlanner:
         if "staff" in q_lower and ("attendance" in q_lower or "present" in q_lower or "rate" in q_lower or "%" in q_lower):
             return self.create_staff_attendance_plan(question, target_dialect=dialect)
 
+        # Schema-linked CTE planning using Two-Stage SchemaContext (Problem 2 integration)
+        if schema_context is not None:
+            ctx_tables = list(getattr(schema_context, "selected_table_names", None) or [])
+            if isinstance(schema_context, dict):
+                ctx_tables = list(schema_context.get("selected_table_names", []))
+
+            if ctx_tables:
+                primary_table = ctx_tables[0]
+                candidate_sections = getattr(schema_context, "candidate_tables", None) or []
+                resolved_lits = getattr(schema_context, "resolved_literals", None) or []
+                join_rels = list(getattr(schema_context, "join_relationships", None) or [])
+                nested_hints = list(getattr(schema_context, "nested_field_hints", None) or [])
+
+                # Collect directly selectable column names for primary_table
+                selectable_cols: List[str] = []
+                required_cols: List[str] = []
+                if candidate_sections:
+                    primary_sec = candidate_sections[0]
+                    for col in getattr(primary_sec, "selected_columns", []):
+                        cpath = getattr(col, "path", "")
+                        cname = getattr(col, "column_name", cpath)
+                        if cpath and f"{primary_table}.{cpath}" not in required_cols:
+                            required_cols.append(f"{primary_table}.{cpath}")
+                        if cname and cname not in selectable_cols:
+                            selectable_cols.append(cname)
+                else:
+                    col_paths = list(getattr(schema_context, "selected_column_paths", None) or [])
+                    if isinstance(schema_context, dict):
+                        col_paths = list(schema_context.get("selected_column_paths", []))
+                    required_cols = col_paths[:10]
+                    for cp in col_paths:
+                        parts = cp.split(".")
+                        if len(parts) >= 2 and parts[0] == primary_table and parts[1] not in selectable_cols:
+                            selectable_cols.append(parts[1])
+
+                if not selectable_cols:
+                    selectable_cols = ["*"]
+                else:
+                    selectable_cols = selectable_cols[:8]
+
+                # Collect grounded literal filters scoped to primary_table
+                filter_preds: List[str] = []
+                for lit in resolved_lits:
+                    ltbl = getattr(lit, "table_name", None) or (lit.get("table_name") if isinstance(lit, dict) else None)
+                    lpred = getattr(lit, "sql_predicate", None) or (lit.get("sql_predicate") if isinstance(lit, dict) else None)
+                    if ltbl == primary_table and lpred and lpred not in filter_preds:
+                        filter_preds.append(lpred)
+
+                cols_sql = ", ".join(selectable_cols)
+                where_sql = f"\nWHERE {' AND '.join(filter_preds)}" if filter_preds else ""
+                is_count_intent = any(tok in q_lower for tok in ("how many", "count ", "total number", "number of"))
+                step1 = CTEPlanStep(
+                    step_name="schema_filtered_base",
+                    purpose=f"Extract linked columns from candidate table '{primary_table}' with grounded filters",
+                    input_tables=[primary_table],
+                    required_columns=required_cols or selectable_cols,
+                    filters=filter_preds,
+                    grouping_dimensions=[],
+                    aggregation_logic="COUNT(*)" if is_count_intent else "None",
+                    mathematical_calculations="None",
+                    dependencies=[],
+                    expected_output_grain="single_row_aggregate" if is_count_intent else f"{primary_table}_record",
+                    columns_produced=["total_count"] if is_count_intent else selectable_cols,
+                    sql_fragment=f"SELECT {cols_sql}\nFROM {primary_table}{where_sql}",
+                )
+
+                notes_parts: List[str] = [f"Schema-linked tables: {', '.join(ctx_tables)}."]
+                if join_rels:
+                    notes_parts.append(f"Join paths: {'; '.join(join_rels[:3])}.")
+                if nested_hints:
+                    notes_parts.append(f"Nested field access required ({len(nested_hints)} field(s)).")
+
+                final_sel = (
+                    "SELECT COUNT(*) AS total_count FROM schema_filtered_base"
+                    if is_count_intent
+                    else "SELECT * FROM schema_filtered_base LIMIT 25"
+                )
+                plan = LogicPlan(
+                    query=question,
+                    target_dialect=dialect,
+                    strategy=(
+                        f"Schema-linked CTE plan grounded in candidate table(s) {', '.join(ctx_tables)} "
+                        f"with {len(required_cols)} retrieved field(s)."
+                    ),
+                    cte_steps=[step1],
+                    final_select=final_sel,
+                    expected_output_grain=step1.expected_output_grain,
+                    dialect_functions_used=["NESTED_ACCESS"] if nested_hints else [],
+                    validation_notes=" ".join(notes_parts),
+                    planner_backend="schema_linked",
+                )
+                self.validator.validate_plan(plan)
+                return plan
+
         # Fallback to single-CTE query
         step1 = CTEPlanStep(
             step_name="base_data",
@@ -726,7 +821,12 @@ class CTEPlanner:
         self,
         question: str,
         target_dialect: Optional[str] = None,
+        schema_context: Optional[Any] = None,
     ) -> str:
         """Decomposes a question into a validated LogicPlan and compiles it into clean SQL."""
-        plan = self.plan_question(question, target_dialect=target_dialect)
+        plan = self.plan_question(
+            question,
+            target_dialect=target_dialect,
+            schema_context=schema_context,
+        )
         return self.compiler.compile(plan, target_dialect=target_dialect)

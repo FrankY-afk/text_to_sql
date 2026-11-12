@@ -148,6 +148,71 @@ def resolve_categorical_literals(user_query: str, target: str = "postgres") -> L
     return [m.model_dump() for m in matches]
 
 
+@server.tool(
+    name="get_table_relationships",
+    description="Retrieves schemas, primary keys, and foreign-key join relationships for tables in the target database.",
+)
+def get_table_relationships(table_name: Optional[str] = None, target: str = "postgres") -> Dict[str, Any]:
+    """Returns schema list, primary keys, and foreign key join edges for schema linking."""
+    inspector = SchemaInspector(target=target)
+    schemas = inspector.get_schemas()
+    target_tables = [table_name] if table_name else inspector.get_table_names()
+    fks: List[Dict[str, Any]] = []
+    pks: Dict[str, List[str]] = {}
+    for tbl in target_tables:
+        try:
+            meta = inspector.get_table_metadata(tbl, include_samples=False)
+            pks[meta.full_name] = meta.primary_keys
+            fks.extend(fk.model_dump() for fk in meta.foreign_keys)
+        except Exception as exc:
+            logger.debug("Skipping metadata inspection for '%s': %s", tbl, exc)
+    return {
+        "target": target,
+        "schemas": schemas,
+        "primary_keys": pks,
+        "foreign_keys": fks,
+    }
+
+
+_mcp_retriever_cache: Dict[str, Any] = {}
+
+
+@server.tool(
+    name="retrieve_schema_context",
+    description="Performs Two-Stage Enterprise Schema Linking (coarse tables + fine columns + nested fields + literals) and returns pruned SchemaContext.",
+)
+def retrieve_schema_context(
+    user_query: str,
+    target: str = "postgres",
+    top_k_tables: int = 5,
+    top_k_columns_per_table: int = 8,
+    refresh: bool = False,
+) -> Dict[str, Any]:
+    """Runs Two-Stage Schema Linking via MCP using cached BGE/Chroma indices."""
+    from src.schema_context_builder import EnterpriseSchemaRetriever
+
+    cache_key = target.lower().strip()
+    retriever = _mcp_retriever_cache.get(cache_key)
+    inspector = SchemaInspector(target=target)
+    dialect = "sqlite" if cache_key in ("local", "sqlite") else cache_key
+
+    if retriever is None:
+        retriever = EnterpriseSchemaRetriever(in_memory=True, collection_prefix=f"mcp_{cache_key}")
+        retriever.index_from_inspector(inspector=inspector, clear_existing=True, index_distinct_values=False)
+        _mcp_retriever_cache[cache_key] = retriever
+    elif refresh:
+        retriever.refresh(inspector=inspector, dialect=dialect)
+
+    ctx = retriever.retrieve_schema_context(
+        query=user_query,
+        top_k_tables=top_k_tables,
+        top_k_columns_per_table=top_k_columns_per_table,
+        target_dialect=dialect,
+        require_db_evidence_for_literals=True,
+    )
+    return ctx.model_dump()
+
+
 def run_standalone_server() -> None:
     """Entrypoint to run the MCP server using standard I/O (stdio) transport."""
     server.run()

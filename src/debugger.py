@@ -165,6 +165,7 @@ class ExecutionGroundedDebugger:
         error_details: str,
         current_sql: str,
         target_dialect: str,
+        schema_context: Optional[Any] = None,
     ) -> str:
         """Formulates actionable repair instructions to guide query regeneration."""
         if category == ErrorCategory.FILTER_MISPLACEMENT:
@@ -202,6 +203,17 @@ class ExecutionGroundedDebugger:
             return (
                 "FIX SECURITY VIOLATION: Destructive operations (DROP, DELETE, UPDATE, ALTER, CREATE) are strictly forbidden. "
                 "Emit only read-only SELECT queries."
+            )
+
+        err_lower = error_details.lower()
+        if schema_context is not None and any(
+            tok in err_lower for tok in ("does not exist", "no such column", "no such table", "ambiguous", "not found")
+        ):
+            tbls = ", ".join(getattr(schema_context, "selected_table_names", [])[:5])
+            cols = ", ".join(getattr(schema_context, "selected_column_paths", [])[:12])
+            return (
+                f"FIX SCHEMA LINKING / SQL ERROR: {error_details}. "
+                f"Use ONLY verified candidate tables [{tbls}] and column paths [{cols}]."
             )
 
         return f"FIX SQL ERROR: {error_details}"
@@ -255,6 +267,7 @@ class ExecutionGroundedDebugger:
             use_hf=use_hf,
         )
         current_sql = gen_result.generated_sql
+        schema_ctx = gen_result.schema_context
 
         for attempt_idx in range(1, self.max_retries + 1):
             sql_hash = hashlib.sha256(current_sql.encode("utf-8")).hexdigest()
@@ -267,7 +280,9 @@ class ExecutionGroundedDebugger:
             ast_report = validate_readonly_sql(current_sql, dialect=dialect)
             if not ast_report.is_valid:
                 cat, err_msg = self.classify_error(ast_report=ast_report)
-                advice = self.generate_repair_guidance(cat, err_msg, current_sql, dialect)
+                advice = self.generate_repair_guidance(
+                    cat, err_msg, current_sql, dialect, schema_context=schema_ctx
+                )
                 history.append(
                     AttemptRecord(
                         attempt_index=attempt_idx,
@@ -280,7 +295,9 @@ class ExecutionGroundedDebugger:
                     )
                 )
                 # Repair: Fall back to validated CTE plan compiler
-                plan = self.generator.planner.plan_question(question, target_dialect=dialect)
+                plan = self.generator.planner.plan_question(
+                    question, target_dialect=dialect, schema_context=schema_ctx
+                )
                 current_sql = CTEPlanCompiler.compile(plan, target_dialect=dialect)
                 continue
 
@@ -288,7 +305,9 @@ class ExecutionGroundedDebugger:
             sem_report = validate_semantic_analysis(current_sql, contract=contract, dialect=dialect)
             if not sem_report.is_semantically_sound:
                 cat, err_msg = self.classify_error(semantic_report=sem_report)
-                advice = self.generate_repair_guidance(cat, err_msg, current_sql, dialect)
+                advice = self.generate_repair_guidance(
+                    cat, err_msg, current_sql, dialect, schema_context=schema_ctx
+                )
                 history.append(
                     AttemptRecord(
                         attempt_index=attempt_idx,
@@ -300,7 +319,9 @@ class ExecutionGroundedDebugger:
                         repair_advice=advice,
                     )
                 )
-                plan = self.generator.planner.plan_question(question, target_dialect=dialect)
+                plan = self.generator.planner.plan_question(
+                    question, target_dialect=dialect, schema_context=schema_ctx
+                )
                 current_sql = CTEPlanCompiler.compile(plan, target_dialect=dialect)
                 continue
 
@@ -308,7 +329,9 @@ class ExecutionGroundedDebugger:
             dry_ok, dry_err = self.run_dry_run_explain(current_sql, target=final_target)
             if not dry_ok:
                 cat, err_msg = self.classify_error(db_error=dry_err)
-                advice = self.generate_repair_guidance(cat, err_msg, current_sql, dialect)
+                advice = self.generate_repair_guidance(
+                    cat, err_msg, current_sql, dialect, schema_context=schema_ctx
+                )
                 history.append(
                     AttemptRecord(
                         attempt_index=attempt_idx,
@@ -320,7 +343,9 @@ class ExecutionGroundedDebugger:
                         repair_advice=advice,
                     )
                 )
-                plan = self.generator.planner.plan_question(question, target_dialect=dialect)
+                plan = self.generator.planner.plan_question(
+                    question, target_dialect=dialect, schema_context=schema_ctx
+                )
                 current_sql = CTEPlanCompiler.compile(plan, target_dialect=dialect)
                 continue
 
@@ -328,6 +353,9 @@ class ExecutionGroundedDebugger:
             exec_res = self.executor.execute_readonly_sql_sync(current_sql, target=final_target)
             if not exec_res.get("success"):
                 cat, err_msg = self.classify_error(db_error=exec_res.get("error"))
+                advice = self.generate_repair_guidance(
+                    cat, err_msg, current_sql, dialect, schema_context=schema_ctx
+                )
                 history.append(
                     AttemptRecord(
                         attempt_index=attempt_idx,
@@ -336,7 +364,7 @@ class ExecutionGroundedDebugger:
                         is_semantically_sound=True,
                         error_category=cat,
                         error_message=err_msg,
-                        repair_advice="Execution failed in database engine.",
+                        repair_advice=advice,
                     )
                 )
                 continue

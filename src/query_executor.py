@@ -82,6 +82,43 @@ class MCPQueryExecutor:
             raise MCPClientError(f"resolve_categorical_literals failed: {result.content}")
         return result.structured_content["result"]
 
+    async def get_table_relationships(
+        self,
+        table_name: Optional[str] = None,
+        target: str = "postgres",
+    ) -> Dict[str, Any]:
+        """Calls MCP tool 'get_table_relationships'."""
+        payload: Dict[str, Any] = {"target": target}
+        if table_name is not None:
+            payload["table_name"] = table_name
+        result = await self.server.call_tool("get_table_relationships", payload)
+        if result.is_error:
+            raise MCPClientError(f"get_table_relationships failed: {result.content}")
+        return result.structured_content["result"]
+
+    async def retrieve_schema_context(
+        self,
+        user_query: str,
+        target: str = "postgres",
+        top_k_tables: int = 5,
+        top_k_columns_per_table: int = 8,
+        refresh: bool = False,
+    ) -> Dict[str, Any]:
+        """Calls MCP tool 'retrieve_schema_context'."""
+        result = await self.server.call_tool(
+            "retrieve_schema_context",
+            {
+                "user_query": user_query,
+                "target": target,
+                "top_k_tables": top_k_tables,
+                "top_k_columns_per_table": top_k_columns_per_table,
+                "refresh": refresh,
+            },
+        )
+        if result.is_error:
+            raise MCPClientError(f"retrieve_schema_context failed: {result.content}")
+        return result.structured_content["result"]
+
     # Synchronous convenience wrappers for ease of use in scripts and tests
     def list_tables_sync(self, target: str = "postgres") -> List[str]:
         return asyncio.run(self.list_tables(target=target))
@@ -100,3 +137,28 @@ class MCPQueryExecutor:
 
     def resolve_categorical_literals_sync(self, user_query: str, target: str = "postgres") -> List[Dict[str, Any]]:
         return asyncio.run(self.resolve_categorical_literals(user_query=user_query, target=target))
+
+    def get_table_relationships_sync(
+        self,
+        table_name: Optional[str] = None,
+        target: str = "postgres",
+    ) -> Dict[str, Any]:
+        return asyncio.run(self.get_table_relationships(table_name=table_name, target=target))
+
+    def retrieve_schema_context_sync(
+        self,
+        user_query: str,
+        target: str = "postgres",
+        top_k_tables: int = 5,
+        top_k_columns_per_table: int = 8,
+        refresh: bool = False,
+    ) -> Dict[str, Any]:
+        return asyncio.run(
+            self.retrieve_schema_context(
+                user_query=user_query,
+                target=target,
+                top_k_tables=top_k_tables,
+                top_k_columns_per_table=top_k_columns_per_table,
+                refresh=refresh,
+            )
+        )

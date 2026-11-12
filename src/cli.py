@@ -26,7 +26,11 @@ from src.config import get_settings
 from src.cte_planner import CTEPlanCompiler, CTEPlanner
 from src.debugger import ExecutionGroundedDebugger
 from src.dialect_rag import DialectFunctionRAG
-from src.evaluator import Problem1Evaluator, run_full_problem1_benchmark
+from src.evaluator import (
+    Problem1Evaluator,
+    Problem2RetrievalEvaluator,
+    run_full_problem1_benchmark,
+)
 from src.query_executor import MCPQueryExecutor
 from src.schema_inspector import SchemaInspector
 from src.semantic_validator import validate_semantic_analysis
@@ -73,6 +77,7 @@ class InteractiveConsole:
         menu.add_row("5", "SQL Security Sandbox (Test AST validation on custom SQL)", "Active Target")
         menu.add_row("6", f"Toggle Target Database (Current: {self.active_target.upper()})", "Switch Target")
         menu.add_row("7", "Run Full Spider 2.0 Regression Suite (10 Failure Modes)", "Local Benchmark")
+        menu.add_row("8", "Run Problem 2 Enterprise Schema Linking Evaluation (20 Tables / 240+ Cols)", "In-Memory + BGE")
         menu.add_row("help", "Redisplay this menu", "-")
         menu.add_row("q", "Exit / Quit", "-")
 
@@ -125,6 +130,46 @@ class InteractiveConsole:
             f"[dim]As specified in benchmark rules, execution accuracy and analytical plan correctness are tracked separately.[/dim]\n"
         )
 
+    def run_problem2_schema_evaluation(self) -> None:
+        """Executes Stage 7 Enterprise Schema Linking Evaluation Suite (Problem 2)."""
+        console.print("\n[bold cyan]=== Running Problem 2: Two-Stage Schema Linking Evaluation ===[/bold cyan]\n")
+        report = Problem2RetrievalEvaluator.run_benchmark(embedding_backend="auto")
+
+        summary = Table(title="Stage 7 Retrieval Metrics (Aggregated)", border_style="bright_blue")
+        summary.add_column("Metric", style="bold yellow")
+        summary.add_column("Value", style="bold green")
+        summary.add_row("Indexed Enterprise Catalog", f"{report.total_tables_indexed} tables / {report.total_columns_indexed} fields")
+        summary.add_row("Table Recall@K", f"{report.mean_table_recall_at_k:.2%}")
+        summary.add_row("Column Recall@K", f"{report.mean_column_recall_at_k:.2%}")
+        summary.add_row("Table Precision@K / Col Precision@K", f"{report.mean_table_precision_at_k:.2%} / {report.mean_column_precision_at_k:.2%}")
+        summary.add_row("Mean Reciprocal Rank (Table MRR / Col MRR)", f"{report.mean_reciprocal_rank:.3f} / {report.mean_column_mrr:.3f}")
+        summary.add_row("Mean Schema Token Reduction", f"{report.mean_token_reduction_pct:.1f}%")
+        summary.add_row("Mean Retrieval Latency", f"{report.mean_retrieval_latency_ms:.2f} ms")
+        summary.add_row("DB-Evidenced Literal Accuracy", f"{report.literal_resolution_accuracy:.2%}")
+        console.print(summary)
+
+        cases_tbl = Table(title="Per-Case Retrieval Breakdown", border_style="cyan")
+        cases_tbl.add_column("ID", style="bold yellow", width=7)
+        cases_tbl.add_column("Scenario", style="white")
+        cases_tbl.add_column("Tbl R@K", style="green", width=8)
+        cases_tbl.add_column("Col R@K", style="green", width=8)
+        cases_tbl.add_column("MRR", style="cyan", width=6)
+        cases_tbl.add_column("Token Save", style="magenta", width=11)
+        cases_tbl.add_column("Latency", style="dim", width=10)
+        for cr in report.case_results:
+            cases_tbl.add_row(
+                cr.case_id,
+                cr.category,
+                f"{cr.table_recall_at_k:.0%}",
+                f"{cr.column_recall_at_k:.0%}",
+                f"{cr.table_reciprocal_rank:.2f}",
+                f"{cr.token_reduction_pct:.1f}%",
+                f"{cr.retrieval_latency_ms:.1f} ms",
+            )
+        console.print("\n")
+        console.print(cases_tbl)
+        console.print(f"[dim]{report.scope_disclaimer}[/dim]\n")
+
     def run_problem1_analysis(self, question: str, target: Optional[str] = None) -> None:
         """Runs the complete Problem 1 Baseline vs Improved analysis and displays Rich comparison."""
         tgt = target or self.active_target
@@ -146,8 +191,32 @@ class InteractiveConsole:
         contract_table.add_row("Returning Filter", contract.returning_cohort_filter or "Active Subset")
         console.print(contract_table)
 
+        # 1b. Show Two-Stage Schema Linking Summary (Problem 2)
+        schema_ctx = self.generator.get_schema_context(question, target=tgt)
+        if schema_ctx is not None and schema_ctx.candidate_tables:
+            schema_tbl = Table(
+                title=(
+                    f"Two-Stage Schema Linking (Latency: {schema_ctx.retrieval_latency_ms:.1f}ms | "
+                    f"Token Reduction: {schema_ctx.token_reduction_pct:.1f}%)"
+                ),
+                border_style="bright_blue",
+                show_header=True,
+            )
+            schema_tbl.add_column("Candidate Table", style="bold yellow")
+            schema_tbl.add_column("Score", style="green", width=7)
+            schema_tbl.add_column("Pruned Columns", style="cyan")
+            for sec in schema_ctx.candidate_tables:
+                col_list = ", ".join(c.path for c in sec.selected_columns)
+                schema_tbl.add_row(
+                    sec.full_name,
+                    f"{sec.similarity_score:.2f}",
+                    f"({len(sec.selected_columns)}/{sec.total_table_columns}) {col_list}",
+                )
+            console.print("\n")
+            console.print(schema_tbl)
+
         # 2. Show Structured CTE Logic Plan (Mechanism A)
-        plan = self.planner.plan_question(question, target_dialect=dialect)
+        plan = self.planner.plan_question(question, target_dialect=dialect, schema_context=schema_ctx)
         cte_table = Table(title=f"Structured CTE Logic Plan ({len(plan.cte_steps)} Decomposed Steps)", border_style="cyan", show_header=True)
         cte_table.add_column("#", style="dim", width=3)
         cte_table.add_column("CTE Name", style="bold yellow")
@@ -419,6 +488,9 @@ class InteractiveConsole:
 
                 elif cmd == "7":
                     self.run_benchmark_suite()
+
+                elif cmd == "8":
+                    self.run_problem2_schema_evaluation()
 
                 elif user_input.upper().startswith("SELECT ") or user_input.upper().startswith("WITH "):
                     # User typed or pasted a multi-line SQL query directly

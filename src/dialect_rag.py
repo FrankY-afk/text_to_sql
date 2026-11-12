@@ -333,6 +333,58 @@ DIALECT_CATALOG: List[DialectFunctionSpec] = [
         description="Calculates a running total across ordered rows.",
         caveats_and_pitfalls="Explicitly specify ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW to prevent duplicate ordering peer aggregation.",
     ),
+
+    # --------------------------------------------------------------------------
+    # Nested JSON, STRUCT, and ARRAY Access / Unnesting
+    # --------------------------------------------------------------------------
+    DialectFunctionSpec(
+        name="jsonb_extract_postgres",
+        dialect="postgres",
+        category="nested",
+        syntax_pattern="{col}->'{key}'->>'{leaf_key}' / CROSS JOIN LATERAL jsonb_array_elements({col}::jsonb) AS item",
+        argument_types=["jsonb/json", "text key"],
+        return_type="text / jsonb set",
+        description="Extracts JSON/JSONB object fields (->> for text, -> for JSONB) and unnests JSON arrays in PostgreSQL.",
+        caveats_and_pitfalls="PostgreSQL JSON/JSONB nested paths cannot be queried with flat dot notation; use -> / ->> or jsonb_array_elements().",
+    ),
+    DialectFunctionSpec(
+        name="unnest_bigquery",
+        dialect="bigquery",
+        category="nested",
+        syntax_pattern="FROM {table} CROSS JOIN UNNEST({array_col}) AS item",
+        argument_types=["ARRAY<STRUCT<...>>"],
+        return_type="unnested struct rows",
+        description="Flattens repeated STRUCT/ARRAY fields (such as GA4 event_params) into rows in BigQuery.",
+        caveats_and_pitfalls="BigQuery ARRAY<STRUCT> columns must be explicitly unnested via CROSS JOIN UNNEST(col) AS item before selecting item.value.string_value.",
+    ),
+    DialectFunctionSpec(
+        name="unnest_duckdb",
+        dialect="duckdb",
+        category="nested",
+        syntax_pattern="FROM {table} CROSS JOIN UNNEST({array_col}) AS _u(item)",
+        argument_types=["STRUCT(...)[] / ARRAY"],
+        return_type="unnested struct rows",
+        description="Unnests ARRAY/LIST columns and reads STRUCT fields via dot-notation (item.field) in DuckDB.",
+        caveats_and_pitfalls="DuckDB supports direct struct.field dot access for scalar STRUCTs, but ARRAY of STRUCTs requires UNNEST() first.",
+    ),
+    DialectFunctionSpec(
+        name="lateral_flatten_snowflake",
+        dialect="snowflake",
+        category="nested",
+        syntax_pattern="FROM {table}, LATERAL FLATTEN(input => {variant_col}) AS item",
+        argument_types=["VARIANT / ARRAY / OBJECT"],
+        return_type="flattened rows",
+        description="Expands semi-structured VARIANT arrays/objects and navigates nested properties using item.value:key::STRING.",
+    ),
+    DialectFunctionSpec(
+        name="json_extract_sqlite",
+        dialect="sqlite",
+        category="nested",
+        syntax_pattern="json_extract({col}, '$.{path}') / , json_each({col}) AS item",
+        argument_types=["json text", "json path"],
+        return_type="scalar value",
+        description="Extracts JSON properties and unnests JSON arrays in SQLite.",
+    ),
 ]
 
 
@@ -354,6 +406,10 @@ OPERATION_KEYWORDS: Dict[str, Set[str]] = {
     "aggregation": {
         "aggregate", "distinct", "unique", "string_agg", "listagg", "concat", "concatenate",
         "median", "percentile", "p50", "p90", "p95", "p99", "sum", "count",
+    },
+    "nested": {
+        "json", "jsonb", "struct", "array", "unnest", "nested", "flatten", "variant",
+        "event_params", "payload", "attributes", "metadata", "object",
     },
 }
 
