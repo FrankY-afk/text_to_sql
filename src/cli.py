@@ -83,6 +83,9 @@ class InteractiveConsole:
         menu.add_row("8", "Run Problem 2 Enterprise Schema Linking Evaluation (20 Tables / 240+ Cols)", "In-Memory + BGE")
         menu.add_row("9", "Problem 2: Schema Linking & Pruner Sandbox (Coarse/Fine Pruning)", "Live PostgreSQL")
         menu.add_row("10", "Problem 2: Relational Graph Join Path Discovery (BFS)", "Live PostgreSQL")
+        menu.add_row("11", "Run Spider 2.0 Problem 3 Benchmark (Doc Grounding & Probing)", "Knowledge Base + DB")
+        menu.add_row("12", "Search Business Rules & Metric Knowledge Base (Doc RAG)", "Knowledge Base")
+        menu.add_row("13", "Run Autonomous Diagnostic Probes on Database", "Active Target")
         menu.add_row("help", "Redisplay this menu", "-")
         menu.add_row("q", "Exit / Quit", "-")
 
@@ -572,6 +575,83 @@ class InteractiveConsole:
         else:
             console.print(Panel(f"[bold red]No relational join path found between '{t1}' and '{t2}'.[/bold red]", border_style="red"))
 
+
+    def run_problem3_evaluation(self) -> None:
+        """Executes Spider 2.0 Problem 3 Benchmark Suite (Doc Grounding & Autonomous Exploration)."""
+        console.print("\n[bold cyan]=== Running Spider 2.0 Problem 3 Benchmark: Documentation Grounding & Exploration ===[/bold cyan]\n")
+        report = Problem3Evaluator.run_benchmark(embedding_backend="hash")
+
+        table = Table(title="Spider 2.0 Problem 3 Evaluation Results (10 Test Cases)", border_style="bright_blue")
+        table.add_column("Case ID", style="bold yellow", width=8)
+        table.add_column("Domain", style="cyan", width=12)
+        table.add_column("Target Metric", style="white", width=25)
+        table.add_column("Doc Match", justify="center", width=10)
+        table.add_column("Baseline", justify="center", width=10)
+        table.add_column("Problem 3", justify="center", width=10)
+        table.add_column("Exploration", justify="center", width=12)
+
+        for c in report.case_results:
+            doc_str = "[bold green]MATCH[/bold green]" if c.doc_retrieved_correctly else "[dim red]MISS[/dim red]"
+            p3_str = "[bold green]COMPLIANT[/bold green]" if c.problem3_compliant else "[bold red]FAIL[/bold red]"
+            base_str = "[dim red]NON-COMPL[/dim red]"
+            exp_str = "[bold cyan]PROBED[/bold cyan]" if c.exploration_performed else "[dim]N/A[/dim]"
+            table.add_row(c.case_id, c.domain, c.target_metric, doc_str, base_str, p3_str, exp_str)
+
+        console.print(table)
+        console.print(
+            f"\n[bold green]Problem 3 Benchmark Summary:[/bold green] "
+            f"[bold]Doc Grounding Accuracy: {report.doc_grounding_accuracy:.1f}%[/bold] | "
+            f"[bold]Problem 3 Metric Compliance: {report.problem3_compliance_rate:.1f}%[/bold] | "
+            f"[bold]Baseline Compliance: {report.baseline_compliance_rate:.1f}%[/bold] "
+            f"({report.total_cases}/{report.total_cases} cases passed).\n"
+        )
+
+    def search_documentation_knowledge_base(self) -> None:
+        """Searches the business rulebooks and metrics knowledge base (Doc RAG)."""
+        console.print("\n[bold cyan]Problem 3 External Documentation & Business Metric Search[/bold cyan]")
+        query = Prompt.ask("Enter business concept, metric name, or rule to search").strip()
+        if not query:
+            return
+
+        retriever = DocumentationRetriever(in_memory=True, embedding_backend="hash")
+        res = retriever.retrieve_documentation(query=query, top_k=3)
+
+        if res.matched_metrics:
+            m_table = Table(title="Matched Enterprise Business Metrics", border_style="green")
+            m_table.add_column("Metric Name", style="bold yellow")
+            m_table.add_column("Domain", style="cyan")
+            m_table.add_column("Formula / Calculation", style="white")
+            m_table.add_column("Required Tables", style="dim")
+            for m in res.matched_metrics:
+                m_table.add_row(m.name, m.domain, m.calculation_formula_sql, ", ".join(m.required_tables))
+            console.print(m_table)
+
+        if res.formatted_prompt_block:
+            console.print(Panel(res.formatted_prompt_block, title="Formatted Grounding Prompt Context for LLM", border_style="cyan"))
+
+    def run_autonomous_diagnostic_probes(self) -> None:
+        """Runs interactive exploratory probes on the active database."""
+        console.print(f"\n[bold cyan]Problem 3 Autonomous Database Exploration [{self.active_target.upper()}][/bold cyan]")
+        q = Prompt.ask("Enter query topic or question to explore data for").strip()
+        if not q:
+            return
+
+        explorer = DatabaseExplorer()
+        report = explorer.explore_for_query(q, target=self.active_target)
+
+        table = Table(title=f"Diagnostic Probes Executed ({len(report.probes_run)} probes)", border_style="yellow")
+        table.add_column("Probe Type", style="bold cyan")
+        table.add_column("Table / Target", style="white")
+        table.add_column("Finding Summary", style="green")
+        table.add_column("Anomaly", style="bold red")
+
+        for p in report.probes_run:
+            table.add_row(p.probe_type.value, p.table_name, p.finding_summary, p.anomaly_detail or "None")
+
+        console.print(table)
+        if report.exploration_guidance:
+            console.print(Panel(report.exploration_guidance, title="Exploration Guidance for SQL Generation", border_style="green"))
+
     def start_loop(self) -> None:
         """Main REPL loop."""
         self.print_banner()
@@ -635,6 +715,15 @@ class InteractiveConsole:
 
                 elif cmd == "10":
                     self.inspect_join_paths()
+
+                elif cmd == "11":
+                    self.run_problem3_evaluation()
+
+                elif cmd == "12":
+                    self.search_documentation_knowledge_base()
+
+                elif cmd == "13":
+                    self.run_autonomous_diagnostic_probes()
 
                 elif user_input.upper().startswith("SELECT ") or user_input.upper().startswith("WITH "):
                     # User typed or pasted a multi-line SQL query directly

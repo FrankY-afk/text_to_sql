@@ -117,6 +117,26 @@ class FindJoinPathInput(BaseModel):
     )
 
 
+class RetrieveDocumentationInput(BaseModel):
+    """Input for retrieving domain business rules, formulas, and metric specifications (Problem 3)."""
+    query: str = Field(description="Natural language question, business concept, or metric name.")
+    top_k: int = Field(default=3, description="Maximum number of relevant documentation chunks to return.")
+
+
+class GetMetricDefinitionsInput(BaseModel):
+    """Input for listing standardized enterprise metric definitions (Problem 3)."""
+    domain: Optional[str] = Field(
+        default=None,
+        description="Optional domain filter ('lending', 'operations', 'customer', 'financial').",
+    )
+
+
+class ExploreDatabaseInput(BaseModel):
+    """Input for running exploratory diagnostic probes on database tables and columns (Problem 3)."""
+    user_query: str = Field(description="User question to explore boundaries, distributions, and fan-out risks for.")
+    target: str = Field(default="postgres", description="Target database: 'postgres' or 'local'.")
+
+
 class GetSchemaGraphInput(BaseModel):
     """Input for retrieving the complete relational knowledge graph."""
     target: str = Field(
@@ -315,6 +335,60 @@ def get_langchain_tools(
         args_schema=GetSchemaGraphInput,
     )
 
+    # Tool 10: retrieve_documentation (Problem 3)
+    def _retrieve_doc(query: str, top_k: int = 3) -> Dict[str, Any]:
+        return exec_inst.retrieve_documentation_sync(query=query, top_k=top_k)
+
+    async def _aretrieve_doc(query: str, top_k: int = 3) -> Dict[str, Any]:
+        return await exec_inst.retrieve_documentation(query=query, top_k=top_k)
+
+    retrieve_doc_tool = StructuredTool.from_function(
+        func=_retrieve_doc,
+        coroutine=_aretrieve_doc,
+        name="retrieve_documentation",
+        description=(
+            "Problem 3 Documentation RAG: Retrieves verified external business rules, metric formulas, "
+            "and compliance definitions from domain documentation. Use whenever calculating business metrics "
+            "(e.g. NPA, GLP, Attendance, Churn, Payouts, Provisioning)."
+        ),
+        args_schema=RetrieveDocumentationInput,
+    )
+
+    # Tool 11: get_metric_definitions (Problem 3)
+    def _get_metrics(domain: Optional[str] = None) -> List[Dict[str, Any]]:
+        return exec_inst.get_metric_definitions_sync(domain=domain)
+
+    async def _aget_metrics(domain: Optional[str] = None) -> List[Dict[str, Any]]:
+        return await exec_inst.get_metric_definitions(domain=domain)
+
+    get_metrics_tool = StructuredTool.from_function(
+        func=_get_metrics,
+        coroutine=_aget_metrics,
+        name="get_metric_definitions",
+        description=(
+            "Lists all standardized business metrics, required tables/columns, SQL formulas, and filter rules."
+        ),
+        args_schema=GetMetricDefinitionsInput,
+    )
+
+    # Tool 12: explore_database (Problem 3)
+    def _explore_db(user_query: str, target: str = default_target) -> Dict[str, Any]:
+        return exec_inst.explore_database_sync(user_query=user_query, target=target)
+
+    async def _aexplore_db(user_query: str, target: str = default_target) -> Dict[str, Any]:
+        return await exec_inst.explore_database(user_query=user_query, target=target)
+
+    explore_db_tool = StructuredTool.from_function(
+        func=_explore_db,
+        coroutine=_aexplore_db,
+        name="explore_database",
+        description=(
+            "Problem 3 Autonomous Exploration: Runs fast read-only diagnostic probes (cardinality, date bounds, "
+            "null distributions, Cartesian fan-out risk) to ground generation on live data before writing queries."
+        ),
+        args_schema=ExploreDatabaseInput,
+    )
+
     return [
         list_tables_tool,
         get_table_schema_tool,
@@ -325,6 +399,9 @@ def get_langchain_tools(
         prune_schema_tool,
         find_join_path_tool,
         get_schema_graph_tool,
+        retrieve_doc_tool,
+        get_metrics_tool,
+        explore_db_tool,
     ]
 
 

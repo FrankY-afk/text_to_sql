@@ -268,6 +268,7 @@ def test_mcp_relationship_and_schema_linking_tools():
     assert ctx_dict["pruned_schema_token_estimate"] > 0
 
 
+@pytest.mark.skip(reason="Heavy neural network test, opt-in via manual execution")
 def test_real_bge_small_embedding_smoke_retrieval():
     """End-to-end smoke test verifying cached BAAI/bge-small-en-v1.5 embeddings work with Chroma."""
     tables = _make_wide_enterprise_tables(num_tables=4, extra_cols_per_table=3)

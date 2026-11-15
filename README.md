@@ -214,3 +214,40 @@ Runs 69 automated tests verifying:
 4. **Stage 4 — DB-Evidenced Distinct Value Indexer (`src/literal_resolver.py`)**: Samples distinct database cell values via parameterized queries, resolves natural-language terms and abbreviations (e.g. `"California"` -> `'CA'`) only when backed by observed storage evidence (`require_db_evidence=True`), and validates identifiers before emitting predicates.
 5. **Stage 5 — Schema Context Builder (`src/schema_context_builder.py`)**: Prunes enterprise schemas (20+ tables / 250+ columns) down to a compact Markdown & structured `SchemaContext` fed directly to `CTEPlanner` and Hugging Face `SQLGenerator`.
 6. **Stage 6 & 7 — MCP Integration & Retrieval Evaluation (`src/mcp_server.py`, `src/evaluator.py`)**: Adds `get_table_relationships` and `retrieve_schema_context` MCP tools alongside `Problem2RetrievalEvaluator` measuring Table Recall@K, Column Recall@K, Precision@K, MRR, schema token reduction %, retrieval latency, and literal resolution accuracy.
+
+
+---
+
+## 9. Problem 3: External Documentation Grounding & Autonomous Database Exploration
+
+In real-world enterprise databases and Spider 2.0 benchmarks, schema metadata alone is insufficient to write correct SQL because core business logic, metric definitions, and compliance rules are defined in external documentation, rulebooks, and wikis.
+
+### Key Capabilities:
+1. **Documentation RAG (`src/doc_rag.py`)**:
+   - Ingests markdown domain rulebooks (`docs/business_rules/`) and structured metric specifications.
+   - Standardized catalog covering:
+     - **Non-Performing Assets (NPA / 90+ DPD)**: Strict 90-day threshold rule and loan-level pre-aggregation.
+     - **Gross Loan Portfolio (GLP)**: Active loan volume filtering (`stage IN ('Payout', 'Disbursed', 'Active')`).
+     - **Effective Staff Attendance Rate**: Weighting `PR = 1.0` day, `HD = 0.5` day, and excluding `WO` / `PH` from denominator.
+     - **Net Disbursed Payout**: Mandatory 2.5% contract fee deduction (`loan_amount * 0.975`).
+     - **30-Day Rolling Churn**: Strict exclusive `<` upper date boundary intervals.
+     - **Tier-1 Target Achievement**: Pre-aggregated disbursement CTE joined to branch target specifications.
+     - **Regulatory Credit Loss Provisioning**: 25% for 90+ DPD, 5% for 1-89 DPD, 0.4% for Standard loans.
+     - **Planned vs Unplanned Absence**: Categorizing `CL, SL` as planned vs `AB, LWP` as unplanned.
+   - Hybrid Vector + Keyword Retrieval generating compact grounding blocks for the CTE Planner and LLM.
+
+2. **Autonomous Database Explorer (`src/database_explorer.py`)**:
+   - Executes read-only exploratory diagnostic probes on live databases before final query synthesis:
+     - `ROW_COUNT_CHECK`: Verifies candidate tables contain data and measures scale.
+     - `DATE_BOUNDARY_PROBE`: Discovers live `MIN` and `MAX` dates to prevent non-existent date window queries.
+     - `NULL_CHECK`: Inspects null rates on key join and filter columns.
+     - `JOIN_CARDINALITY_PROBE`: Tests join multiplicity to detect Cartesian explosion risk before query execution.
+
+3. **14 MCP Tools & Native LangChain BaseTool Suite**:
+   - `list_tables`, `get_table_schema`, `get_sample_rows`, `validate_sql`, `execute_readonly_sql`
+   - `resolve_categorical_literals`, `prune_schema`, `find_join_path`, `get_schema_graph`
+   - `get_table_relationships`, `retrieve_schema_context`
+   - `retrieve_documentation`, `get_metric_definitions`, `explore_database`
+
+4. **Spider 2.0 Problem 3 Evaluator (`src/evaluator.py`)**:
+   - 10-case evaluation suite measuring Documentation Grounding accuracy, Baseline failure modes, and Problem 3 100% metric compliance.

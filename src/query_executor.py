@@ -149,6 +149,47 @@ class MCPQueryExecutor:
             raise MCPClientError(f"retrieve_schema_context failed: {result.content}")
         return result.structured_content["result"]
 
+    async def retrieve_documentation(
+        self,
+        query: str,
+        top_k: int = 3,
+    ) -> Dict[str, Any]:
+        """Calls MCP tool 'retrieve_documentation' (Problem 3)."""
+        result = await self.server.call_tool(
+            "retrieve_documentation",
+            {"query": query, "top_k": top_k},
+        )
+        if result.is_error:
+            raise MCPClientError(f"retrieve_documentation failed: {result.content}")
+        return result.structured_content["result"]
+
+    async def get_metric_definitions(
+        self,
+        domain: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        """Calls MCP tool 'get_metric_definitions' (Problem 3)."""
+        payload: Dict[str, Any] = {}
+        if domain is not None:
+            payload["domain"] = domain
+        result = await self.server.call_tool("get_metric_definitions", payload)
+        if result.is_error:
+            raise MCPClientError(f"get_metric_definitions failed: {result.content}")
+        return result.structured_content["result"]
+
+    async def explore_database(
+        self,
+        user_query: str,
+        target: str = "postgres",
+    ) -> Dict[str, Any]:
+        """Calls MCP tool 'explore_database' (Problem 3)."""
+        result = await self.server.call_tool(
+            "explore_database",
+            {"user_query": user_query, "target": target},
+        )
+        if result.is_error:
+            raise MCPClientError(f"explore_database failed: {result.content}")
+        return result.structured_content["result"]
+
     # Synchronous convenience wrappers for ease of use in scripts and tests
     def list_tables_sync(self, target: str = "postgres") -> List[str]:
         return asyncio.run(self.list_tables(target=target))
@@ -201,3 +242,12 @@ class MCPQueryExecutor:
                 refresh=refresh,
             )
         )
+
+    def retrieve_documentation_sync(self, query: str, top_k: int = 3) -> Dict[str, Any]:
+        return asyncio.run(self.retrieve_documentation(query=query, top_k=top_k))
+
+    def get_metric_definitions_sync(self, domain: Optional[str] = None) -> List[Dict[str, Any]]:
+        return asyncio.run(self.get_metric_definitions(domain=domain))
+
+    def explore_database_sync(self, user_query: str, target: str = "postgres") -> Dict[str, Any]:
+        return asyncio.run(self.explore_database(user_query=user_query, target=target))

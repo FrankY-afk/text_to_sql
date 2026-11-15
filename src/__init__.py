@@ -47,6 +47,24 @@ from src.schema_flattener import FlattenedField, SchemaFlattener
 from src.schema_graph import SchemaGraph
 from src.schema_pruner import SchemaPruner
 from src.table_retriever import TableCandidate, TableRetriever
+from src.doc_rag import (
+    BUILTIN_METRICS,
+    DocRetrievalResult,
+    DocumentChunk,
+    DocumentationRetriever,
+    MetricDefinition,
+)
+from src.database_explorer import (
+    DatabaseExplorer,
+    DiagnosticProbe,
+    ExplorationReport,
+    ProbeType,
+)
+from src.evaluator import (
+    Problem3CaseResult,
+    Problem3EvaluationReport,
+    Problem3Evaluator,
+)
 
 __version__ = "0.3.0"
 

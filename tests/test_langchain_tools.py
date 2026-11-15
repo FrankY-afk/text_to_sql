@@ -15,6 +15,7 @@ from src.langchain_tools import (
     get_langchain_tool_map,
     get_langchain_tools,
 )
+from tests.conftest import postgres_required
 
 
 @pytest.fixture
@@ -29,8 +30,8 @@ def tool_map():
 
 def test_langchain_tool_count_and_types(tools, tool_map):
     """Verifies that all 9 MCP tools are exported as valid LangChain BaseTool instances."""
-    assert len(tools) == 9
-    assert len(tool_map) == 9
+    assert len(tools) == 12
+    assert len(tool_map) == 12
 
     expected_names = {
         "list_tables",
@@ -42,6 +43,9 @@ def test_langchain_tool_count_and_types(tools, tool_map):
         "prune_schema",
         "find_join_path",
         "get_schema_graph",
+        "retrieve_documentation",
+        "get_metric_definitions",
+        "explore_database",
     }
     assert set(tool_map.keys()) == expected_names
 
@@ -53,6 +57,7 @@ def test_langchain_tool_count_and_types(tools, tool_map):
         assert t.args_schema is not None
 
 
+@postgres_required
 def test_langchain_tool_sync_invocation(tool_map):
     """Verifies that LangChain tools execute synchronously via .invoke()."""
     # 1. list_tables returns list of table names
@@ -87,6 +92,7 @@ def test_langchain_tool_sync_invocation(tool_map):
     assert res_path["path_length"] == 2
 
 
+@postgres_required
 @pytest.mark.anyio
 async def test_langchain_tool_async_invocation(tool_map):
     """Verifies that LangChain tools execute asynchronously via .ainvoke()."""
@@ -147,3 +153,15 @@ def test_langchain_sql_plan_schema():
     assert plan_dict["metric_name"] == "June 2026 Staff Attendance Rate"
     assert plan_dict["is_percentage"] is True
     assert len(plan_dict["candidate_tables"]) == 2
+
+def test_langchain_tool_local_invocation(tool_map):
+    """Verifies that LangChain tools execute offline with local SQLite target."""
+    res_tables = tool_map["list_tables"].invoke({"target": "local"})
+    assert isinstance(res_tables, list)
+    assert len(res_tables) > 0
+
+    res_val = tool_map["validate_sql"].invoke({
+        "sql": "SELECT COUNT(*) FROM users;",
+        "target": "local",
+    })
+    assert res_val["is_valid"] is True

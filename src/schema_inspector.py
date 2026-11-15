@@ -86,6 +86,9 @@ class SchemaInspector:
         self.target = target.lower().strip()
         self.settings = settings or get_settings()
         self.duckdb_conn = duckdb_conn
+        self._table_names_cache: Dict[Tuple[Optional[str], bool], List[str]] = {}
+        self._columns_cache: Dict[Tuple[str, Optional[str]], List[Dict[str, Any]]] = {}
+        self._foreign_keys_cache: Dict[Tuple[str, Optional[str]], List[ForeignKeyMetadata]] = {}
 
     def get_schemas(self) -> List[str]:
         """Returns accessible non-system database schemas."""
@@ -119,6 +122,9 @@ class SchemaInspector:
         include_schema_prefix: bool = False,
     ) -> List[str]:
         """Returns sorted list of permitted base table names."""
+        cache_key = (schema, include_schema_prefix)
+        if cache_key in self._table_names_cache:
+            return list(self._table_names_cache[cache_key])
         if self.target in ("local", "sqlite"):
             conn = get_local_db_connection(self.settings)
             cur = conn.cursor()
@@ -153,7 +159,9 @@ class SchemaInspector:
                 (target_schema,),
             )
             tables = [row[0] for row in cur.fetchall()]
-            return [f"{target_schema}.{t}" for t in tables] if include_schema_prefix else tables
+            res = [f"{target_schema}.{t}" for t in tables] if include_schema_prefix else tables
+            self._table_names_cache[cache_key] = res
+            return list(res)
 
     def get_foreign_keys(
         self,
@@ -235,6 +243,9 @@ class SchemaInspector:
         schema: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
         """Returns detailed column specifications for a specific table."""
+        cache_key = (table_name, schema)
+        if cache_key in self._columns_cache:
+            return list(self._columns_cache[cache_key])
         default_schema = "main" if self.target in ("local", "sqlite", "duckdb") else self.settings.postgres_schema
         schema_name, clean_table = split_qualified_table_name(table_name, default_schema=schema or default_schema)
 

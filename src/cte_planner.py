@@ -41,6 +41,8 @@ def normalize_dialect(raw_dialect: str) -> str:
     norm = raw_dialect.lower().strip()
     if norm in ("postgresql", "pgsql"):
         norm = "postgres"
+    elif norm in ("local", "sqlite3"):
+        norm = "sqlite"
     if norm not in SUPPORTED_DIALECTS:
         raise ValueError(
             f"Unsupported SQL dialect '{raw_dialect}'. Supported dialects: {sorted(SUPPORTED_DIALECTS)}"

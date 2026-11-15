@@ -23,6 +23,8 @@ from src.schema_graph import SchemaGraph
 from src.schema_inspector import SchemaInspector
 from src.schema_pruner import SchemaPruner
 from src.sql_validator import validate_readonly_sql
+from src.doc_rag import BUILTIN_METRICS, DocumentationRetriever
+from src.database_explorer import DatabaseExplorer
 
 logger = logging.getLogger(__name__)
 
@@ -252,6 +254,47 @@ def retrieve_schema_context(
     )
     return ctx.model_dump()
 
+
+
+
+_doc_retriever_instance = None
+
+
+@server.tool(
+    name="retrieve_documentation",
+    description="Retrieves domain business rules, compliance calculation formulas, and metric specifications (Spider 2.0 Problem 3).",
+)
+def retrieve_documentation(query: str, top_k: int = 3) -> Dict[str, Any]:
+    """Retrieves matching business rules and formulas from the enterprise documentation knowledge base."""
+    global _doc_retriever_instance
+    if _doc_retriever_instance is None:
+        _doc_retriever_instance = DocumentationRetriever(in_memory=True)
+    res = _doc_retriever_instance.retrieve_documentation(query=query, top_k=top_k)
+    return res.model_dump()
+
+
+@server.tool(
+    name="get_metric_definitions",
+    description="Lists all standardized enterprise business metrics, formulas, required tables, and filter rules (Spider 2.0 Problem 3).",
+)
+def get_metric_definitions(domain: Optional[str] = None) -> List[Dict[str, Any]]:
+    """Returns catalog of standardized business metrics, filtered optionally by domain ('lending', 'operations', 'customer', 'financial')."""
+    metrics = BUILTIN_METRICS
+    if domain:
+        d_lower = domain.lower().strip()
+        metrics = [m for m in metrics if m.domain.lower() == d_lower]
+    return [m.model_dump() for m in metrics]
+
+
+@server.tool(
+    name="explore_database",
+    description="Executes read-only exploratory diagnostic probes (cardinality, date bounds, nulls, join fan-out) before writing queries (Spider 2.0 Problem 3).",
+)
+def explore_database(user_query: str, target: str = "postgres") -> Dict[str, Any]:
+    """Autonomous explorer probing data distribution, boundaries, and join multiplicity to ground query generation."""
+    explorer = DatabaseExplorer()
+    report = explorer.explore_for_query(user_query=user_query, target=target)
+    return report.model_dump()
 
 def run_standalone_server() -> None:
     """Entrypoint to run the MCP server using standard I/O (stdio) transport."""

@@ -105,6 +105,32 @@ def run_demonstration():
     print(f"[Returned Result]  : {dbg_res.raw_result}%")
     print(f"[Self-Repair Trace]: {dbg_res.explanation}")
 
+    # Step 7: Demonstrate Problem 3 (Documentation RAG & Autonomous Exploration)
+    print("\n" + "-" * 80)
+    print("PIPELINE D: SPIDER 2.0 PROBLEM 3 -- DOC RAG & AUTONOMOUS EXPLORATION")
+    print("-" * 80)
+    from src.doc_rag import DocumentationRetriever
+    from src.database_explorer import DatabaseExplorer
+    from src.evaluator import Problem3Evaluator
+
+    doc_retriever = DocumentationRetriever(in_memory=True, embedding_backend="hash")
+    p3_res = doc_retriever.retrieve_documentation(question)
+    print(f"[Problem 3 Doc Grounding]: Matched {len(p3_res.matched_metrics)} business metric rules:")
+    for m in p3_res.matched_metrics:
+        print(f"  -> Metric: {m.name} ({m.domain})")
+        print(f"     Required Tables: {m.required_tables}")
+        print(f"     Calculation Rule: {m.filter_rules}")
+
+    explorer = DatabaseExplorer()
+    exp_report = explorer.explore_for_query(question, target="local")
+    print(f"\n[Problem 3 Autonomous Exploration]: Executed {len(exp_report.probes_run)} diagnostic probes:")
+    for p in exp_report.probes_run:
+        print(f"  -> {p.probe_type.value}: {p.finding_summary}")
+
+    p3_report = Problem3Evaluator.run_benchmark(embedding_backend="hash")
+    print(f"\n[Problem 3 Benchmark Suite]: {p3_report.total_cases}/{p3_report.total_cases} cases passed "
+          f"(Doc Grounding: {p3_report.doc_grounding_accuracy}%, Problem 3 Compliance: {p3_report.problem3_compliance_rate}%)")
+
     print("\n" + "=" * 80)
     print("[COMPARISON SUMMARY]:")
     print(f"  * Baseline Naive Result : {base_res.raw_result}%  [INCORRECT] (Absolute Error: {base_res.absolute_error:.2f}%)")

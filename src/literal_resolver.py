@@ -168,6 +168,7 @@ class LiteralResolver:
         self._chroma_client: Any = None
         self._embedding_function: Any = None
         self.collection: Any = None
+        self._inspector = SchemaInspector(target=self.target, settings=self.settings, duckdb_conn=self.duckdb_conn)
 
     def _ensure_vector_store(self) -> None:
         """Lazily initializes ChromaDB & BGE embeddings only when indexing/querying vectors."""
@@ -252,7 +253,7 @@ class LiteralResolver:
         if self._db_unavailable:
             return []
         try:
-            inspector = SchemaInspector(target="postgres", settings=self.settings)
+            inspector = self._inspector
             if clean_table not in inspector.get_table_names():
                 return []
             valid_cols = {c["name"] for c in inspector.get_table_columns(clean_table)}

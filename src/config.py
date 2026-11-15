@@ -80,6 +80,16 @@ class Settings(BaseSettings):
     )
 
     # Embeddings & Vector Store Configuration (Problem 2: Enterprise Schema Linking)
+    embedding_backend: str = Field(
+        default="hash",
+        validation_alias=AliasChoices(
+            "embedding_backend",
+            "text2sql_embedding_backend",
+            "EMBEDDING_BACKEND",
+            "TEXT2SQL_EMBEDDING_BACKEND",
+        ),
+        description="Embedding backend: 'hash' (fast, deterministic, zero-network) or 'bge' (BAAI/bge-small-en-v1.5)",
+    )
     embedding_model_name: str = Field(
         default="BAAI/bge-small-en-v1.5",
         description="BGE embedding model identifier for table, column, and literal retrieval",
@@ -243,7 +253,7 @@ _bge_embedding_cache: Dict[str, Any] = {}
 
 def get_embedding_function(
     settings: Optional[Settings] = None,
-    backend: str = "auto",
+    backend: Optional[str] = None,
 ) -> Any:
     """Returns a ChromaDB-compatible EmbeddingFunction using the configured BGE model.
 
@@ -253,9 +263,11 @@ def get_embedding_function(
                  or 'auto' (try BGE local cache / download, fall back to hash if offline).
     """
     cfg = settings or get_settings()
-    mode = backend.lower().strip()
+    mode = (backend or cfg.embedding_backend or "hash").lower().strip()
+    if mode == "auto":
+        mode = cfg.embedding_backend.lower().strip() if cfg.embedding_backend != "auto" else "hash"
 
-    if mode == "hash":
+    if mode in ("hash", "deterministic", "offline", "fast"):
         return DeterministicTokenEmbeddingFunction()
 
     cache_key = f"{cfg.embedding_model_name}:{cfg.embedding_device}"

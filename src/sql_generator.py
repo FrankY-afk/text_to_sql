@@ -21,6 +21,8 @@ from src.hf_client import HuggingFaceClient
 from src.literal_resolver import LiteralResolver
 from src.query_executor import MCPQueryExecutor
 from src.schema_context_builder import EnterpriseSchemaRetriever, SchemaContext
+from src.doc_rag import DocumentationRetriever, MetricDefinition
+from src.database_explorer import DatabaseExplorer
 from src.schema_inspector import SchemaInspector
 from src.semantic_validator import AnalyticalContract
 
@@ -41,6 +43,18 @@ class GenerationResult(BaseModel):
         default=None,
         description="Two-stage linked schema context (selected tables, columns, joins, nested hints, literals)",
     )
+    grounded_metrics: List[MetricDefinition] = Field(
+        default_factory=list,
+        description="Problem 3: Grounded business metrics retrieved from external rulebooks",
+    )
+    doc_context: Optional[str] = Field(
+        default=None,
+        description="Problem 3: Documentation grounding prompt block",
+    )
+    exploration_guidance: Optional[str] = Field(
+        default=None,
+        description="Problem 3: Autonomous database exploration findings",
+    )
 
 
 class SQLGenerator:
@@ -60,6 +74,8 @@ class SQLGenerator:
         self.schema_retriever = schema_retriever
         self.embedding_backend = embedding_backend
         self._retriever_cache: Dict[str, EnterpriseSchemaRetriever] = {}
+        self.doc_retriever = DocumentationRetriever(in_memory=True, embedding_backend=self.embedding_backend)
+        self.explorer = DatabaseExplorer(executor=self.executor)
 
     def refresh_schema_index(self, target: str = "postgres") -> None:
         """Clears cached retriever for a target database so next query re-indexes live schema."""
@@ -271,6 +287,7 @@ class SQLGenerator:
         schema_context: str,
         literal_context: str,
         dialect_context: str,
+        doc_context: str = "",
     ) -> str:
         """Constructs a comprehensive, grounded prompt for the Hugging Face model."""
         plan_steps_summary = []
@@ -296,6 +313,8 @@ Strategy: {plan.strategy}
 CTE Sequence:
 {plan_str}
 Final Select Requirement: {plan.final_select}
+
+{doc_context}
 
 {dialect_context}
 
@@ -491,7 +510,11 @@ MANDATORY RULES:
             resolver = LiteralResolver(target=final_target)
             literal_context = resolver.generate_grounding_prompt_hint(question)
 
-        # Step 4: Dialect Function RAG (including nested STRUCT/ARRAY/JSON access rules when applicable)
+        # Step 4: Documentation Grounding (Problem 3)
+        doc_res = self.doc_retriever.retrieve_documentation(question)
+        doc_context = doc_res.formatted_prompt_block if (doc_res.matched_metrics or doc_res.matched_chunks) else ""
+
+        # Step 4b: Dialect Function RAG (including nested STRUCT/ARRAY/JSON access rules when applicable)
         rag_query = f"{question} {plan.strategy}"
         if retrieved_schema and retrieved_schema.nested_field_hints:
             rag_query += " nested struct array json unnest"
@@ -511,6 +534,7 @@ MANDATORY RULES:
                     schema_context=schema_context_text,
                     literal_context=literal_context,
                     dialect_context=dialect_context,
+                    doc_context=doc_context,
                 )
                 generated_sql = self.hf_client.generate_sql(prompt)
                 explanation = (
@@ -526,6 +550,8 @@ MANDATORY RULES:
                     target_database=final_target,
                     logic_plan=plan,
                     schema_context=retrieved_schema,
+                    grounded_metrics=doc_res.matched_metrics,
+                    doc_context=doc_context,
                 )
             except Exception as exc:
                 logger.warning("Hugging Face inference error, falling back to verified CTE compiler: %s", exc)
@@ -546,4 +572,6 @@ MANDATORY RULES:
             target_database=final_target,
             logic_plan=plan,
             schema_context=retrieved_schema,
+            grounded_metrics=doc_res.matched_metrics,
+            doc_context=doc_context,
         )
