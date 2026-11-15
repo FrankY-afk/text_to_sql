@@ -1,10 +1,10 @@
-"""Interactive Terminal CLI Console for Text-to-SQL Problem 1.
+"""Interactive Terminal CLI Console for Text-to-SQL (Spider 2.0 + MCP).
 
-Provides an interactive developer REPL with:
-- Natural Language Question evaluation (Problem 1 Erroneous Analysis diagnosis).
-- Direct SQL Execution Sandbox with real-time AST security validation.
-- Live PostgreSQL schema exploration.
-- Rich-formatted colorized panels, SQL syntax highlighting, and result tables.
+A streamlined developer REPL:
+- Free-text query input (natural language or custom SQL).
+- Adaptive CTE / Direct query planning with MCP schema grounding.
+- Execution-grounded AST validation and self-repair.
+- Outputs query results FIRST, followed by the generated SQL.
 """
 
 from __future__ import annotations
@@ -23,20 +23,11 @@ from rich.table import Table
 from rich.text import Text
 
 from src.config import get_settings
-from src.cte_planner import CTEPlanCompiler, CTEPlanner
 from src.debugger import ExecutionGroundedDebugger
-from src.dialect_rag import DialectFunctionRAG
-from src.evaluator import (
-    Problem1Evaluator,
-    Problem2RetrievalEvaluator,
-    run_full_problem1_benchmark,
-)
+from src.evaluator import run_full_problem1_benchmark
 from src.literal_resolver import LiteralResolver
-from src.schema_graph import SchemaGraph
-from src.schema_pruner import SchemaPruner
 from src.query_executor import MCPQueryExecutor
 from src.schema_inspector import SchemaInspector
-from src.semantic_validator import validate_semantic_analysis
 from src.sql_generator import SQLGenerator
 from src.sql_validator import validate_readonly_sql
 
@@ -44,60 +35,236 @@ console = Console()
 
 
 class InteractiveConsole:
-    """Interactive CLI REPL for Text-to-SQL Problem 1."""
+    """Streamlined CLI REPL for Text-to-SQL."""
 
     def __init__(self):
         self.settings = get_settings()
         self.executor = MCPQueryExecutor()
         self.generator = SQLGenerator(executor=self.executor)
-        self.planner = CTEPlanner()
-        self.dialect_rag = DialectFunctionRAG()
         self.debugger = ExecutionGroundedDebugger(executor=self.executor, generator=self.generator)
-        self.evaluator = Problem1Evaluator(executor=self.executor)
         self.active_target = "postgres"  # Default database target
 
     def print_banner(self) -> None:
-        """Displays the startup banner."""
-        banner_text = (
-            "[bold cyan]Text-to-SQL Problem 1: Interactive Terminal Console[/bold cyan]\n"
-            "[dim]Model Context Protocol (MCP) + PostgreSQL + Semantic AST Validation[/dim]\n\n"
-            f"[bold yellow]Active Database Target:[/bold yellow] [bold green]{self.active_target.upper()}[/bold green] "
-            f"([dim]{'lending_sample on 35.200.180.162' if self.active_target == 'postgres' else 'local_problem1.db'}[/dim])"
+        """Displays a clean startup banner."""
+        target_info = (
+            f"{self.settings.postgres_db} on {self.settings.postgres_host}"
+            if self.active_target == "postgres"
+            else "local_problem1.db (SQLite)"
         )
-        console.print(Panel(banner_text, border_style="cyan", padding=(1, 2)))
+        banner_content = (
+            "[bold cyan]Text-to-SQL Assistant[/bold cyan] [dim](Spider 2.0 • MCP • Adaptive CTE • AST Self-Repair)[/dim]\n"
+            f"[bold yellow]Active Database Target:[/bold yellow] [bold green]{self.active_target.upper()}[/bold green] "
+            f"([dim]{target_info}[/dim])\n\n"
+            "[dim]Commands: [white]'target'[/white] to switch DB | [white]'bench'[/white] to run benchmarks | "
+            "[white]'tables'[/white] to list tables | [white]'exit'[/white] to quit[/dim]"
+        )
+        console.print(Panel(banner_content, border_style="cyan", padding=(1, 2)))
 
-    def print_menu(self) -> None:
-        """Prints available preset options and command hints."""
-        menu = Table(title="Interactive Commands & Presets", border_style="dim", show_header=True)
-        menu.add_column("Key", style="bold yellow", width=6)
-        menu.add_column("Description", style="white")
-        menu.add_column("Target Database", style="dim cyan", width=18)
+    def run_query(self, user_query: str) -> None:
+        """Processes a natural language query through the adaptive debugger.
 
-        menu.add_row("1", "User Retention Benchmark (Jan/Feb Cohort Grain Mismatch)", "Local Benchmark")
-        menu.add_row("2", "Staff Attendance Rate (June 2026 Join Leak Trap)", "Live PostgreSQL")
-        menu.add_row("3", "Group Loan Payout Conversion Rate (May 2026)", "Live PostgreSQL")
-        menu.add_row("4", "Inspect Live PostgreSQL Database Schema & Tables", "Live PostgreSQL")
-        menu.add_row("5", "SQL Security Sandbox (Test AST validation on custom SQL)", "Active Target")
-        menu.add_row("6", f"Toggle Target Database (Current: {self.active_target.upper()})", "Switch Target")
-        menu.add_row("7", "Run Full Spider 2.0 Regression Suite (10 Failure Modes)", "Local Benchmark")
-        menu.add_row("8", "Run Problem 2 Enterprise Schema Linking Evaluation (20 Tables / 240+ Cols)", "In-Memory + BGE")
-        menu.add_row("9", "Problem 2: Schema Linking & Pruner Sandbox (Coarse/Fine Pruning)", "Live PostgreSQL")
-        menu.add_row("10", "Problem 2: Relational Graph Join Path Discovery (BFS)", "Live PostgreSQL")
-        menu.add_row("11", "Run Spider 2.0 Problem 3 Benchmark (Doc Grounding & Probing)", "Knowledge Base + DB")
-        menu.add_row("12", "Search Business Rules & Metric Knowledge Base (Doc RAG)", "Knowledge Base")
-        menu.add_row("13", "Run Autonomous Diagnostic Probes on Database", "Active Target")
-        menu.add_row("help", "Redisplay this menu", "-")
-        menu.add_row("q", "Exit / Quit", "-")
+        CRITICAL REQUIREMENT:
+        Outputs the result of the query FIRST, followed by the generated SQL.
+        """
+        tgt = self.active_target
+        t0 = time.time()
 
-        console.print(menu)
-        console.print("[dim]Tip: You can also type ANY natural language question or custom SQL query directly![/dim]\n")
+        with console.status("[bold cyan]Analyzing intent, grounding schema, and generating SQL...[/bold cyan]", spinner="dots"):
+            debug_res = self.debugger.execute_with_debugging(user_query, target=tgt)
+            elapsed = (time.time() - t0) * 1000
+
+        # Determine strategy type
+        is_cte = "WITH " in debug_res.final_sql.upper().strip()
+        strategy_label = "Adaptive CTE" if is_cte else "Adaptive Direct"
+
+        # -------------------------------------------------------------
+        # 1. DISPLAY OUTPUT OF THE QUERY FIRST
+        # -------------------------------------------------------------
+        console.print("\n")
+        if debug_res.success:
+            # If a scalar percentage / numeric aggregate was computed
+            if debug_res.raw_result is not None:
+                contract_name = (
+                    debug_res.semantic_report.detected_grain
+                    if debug_res.semantic_report
+                    else "Aggregate Metric"
+                )
+                metric_panel = (
+                    f"[bold white]Computed Result:[/bold white] [bold green]{debug_res.raw_result:.2f}%[/bold green]\n"
+                    f"[dim]Metric Grain: {contract_name} | Plausibility Bound: [0%, 100%][/dim]"
+                )
+                console.print(Panel(metric_panel, title="[bold green]Query Output[/bold green]", border_style="green"))
+
+            # If tabular rows returned
+            rows = debug_res.rows
+            columns = debug_res.columns
+            if rows:
+                row_label = f"{len(rows)} row" if len(rows) == 1 else f"{len(rows)} rows"
+                table_title = f"Query Output ({row_label} in {elapsed:.1f}ms)"
+                data_table = Table(
+                    title=table_title,
+                    border_style="green",
+                    header_style="bold cyan",
+                    show_header=True,
+                )
+                for col in columns:
+                    data_table.add_column(str(col))
+                for row in rows:
+                    data_table.add_row(*[str(row.get(c, "")) for c in columns])
+                console.print(data_table)
+            elif debug_res.raw_result is None:
+                console.print(Panel(
+                    "[bold yellow]Query executed successfully, but returned 0 matching rows.[/bold yellow]",
+                    title="[bold yellow]Query Output[/bold yellow]",
+                    border_style="yellow",
+                ))
+        else:
+            # Execution failure
+            error_cat = debug_res.error_category.value if debug_res.error_category else "Execution Error"
+            err_msg = (
+                f"[bold red]Status:[/bold red] Failed after {debug_res.total_attempts} attempt(s)\n"
+                f"[bold red]Category:[/bold red] {error_cat}\n"
+                f"[bold yellow]Diagnostic Notes:[/bold yellow] {debug_res.explanation}"
+            )
+            console.print(Panel(err_msg, title="[bold red]Query Execution Failed[/bold red]", border_style="red"))
+
+        # -------------------------------------------------------------
+        # 2. DISPLAY GENERATED SQL SECOND
+        # -------------------------------------------------------------
+        sql_title = f"[bold cyan]Generated SQL[/bold cyan] [dim]({strategy_label})[/dim]"
+        console.print("\n")
+        console.print(Panel(
+            Syntax(debug_res.final_sql, "sql", theme="monokai", line_numbers=True),
+            title=sql_title,
+            border_style="cyan",
+        ))
+
+        # -------------------------------------------------------------
+        # 3. CONCISE METADATA FOOTER
+        # -------------------------------------------------------------
+        status_color = "green" if debug_res.success else "red"
+        status_text = "Verified Read-Only" if debug_res.success else "Execution Error"
+        attempts_info = f"Attempts: {debug_res.total_attempts}" if debug_res.total_attempts > 1 else "1 attempt"
+        console.print(
+            f"[dim]Target: {tgt.upper()} | Plan: {strategy_label} | Latency: {elapsed:.1f}ms | "
+            f"{attempts_info} | [{status_color}]{status_text}[/{status_color}][/dim]\n"
+        )
+
+    def run_direct_sql(self, sql: str) -> None:
+        """Executes custom SQL through MCP with real-time AST safety.
+
+        CRITICAL REQUIREMENT:
+        Outputs the result of the query FIRST, followed by the validated SQL.
+        """
+        # Step 1: Pre-execution AST security check
+        report = validate_readonly_sql(sql)
+        if not report.is_valid:
+            error_msg = f"[bold red]AST SECURITY VIOLATION REJECTED:[/bold red]\n{report.error}"
+            console.print(Panel(error_msg, border_style="bold red"))
+            return
+
+        # Step 2: Safe execution via MCP
+        tgt = self.active_target
+        t0 = time.time()
+        res = self.executor.execute_readonly_sql_sync(sql, target=tgt)
+        elapsed = (time.time() - t0) * 1000
+
+        # -------------------------------------------------------------
+        # 1. DISPLAY OUTPUT OF THE QUERY FIRST
+        # -------------------------------------------------------------
+        console.print("\n")
+        if not res.get("success"):
+            console.print(Panel(
+                f"[bold red]Database Execution Error:[/bold red]\n{res.get('error')}",
+                title="[bold red]Execution Error[/bold red]",
+                border_style="red",
+            ))
+            return
+
+        rows = res.get("rows", [])
+        columns = res.get("columns", [])
+
+        if rows:
+            row_label = f"{len(rows)} row" if len(rows) == 1 else f"{len(rows)} rows"
+            table = Table(
+                title=f"Query Output ({row_label} in {elapsed:.1f}ms)",
+                border_style="green",
+                header_style="bold cyan",
+                show_header=True,
+            )
+            for col in columns:
+                table.add_column(str(col))
+            for r in rows:
+                table.add_row(*[str(r.get(c, "")) for c in columns])
+            console.print(table)
+        else:
+            console.print(Panel(
+                "[bold yellow]Query executed successfully, but returned 0 rows.[/bold yellow]",
+                title="[bold yellow]Query Output[/bold yellow]",
+                border_style="yellow",
+            ))
+
+        # -------------------------------------------------------------
+        # 2. DISPLAY VALIDATED SQL SECOND
+        # -------------------------------------------------------------
+        console.print("\n")
+        console.print(Panel(
+            Syntax(sql, "sql", theme="monokai", line_numbers=True),
+            title="[bold cyan]Validated SQL[/bold cyan] [dim](AST Verified Read-Only)[/dim]",
+            border_style="cyan",
+        ))
+
+        # -------------------------------------------------------------
+        # 3. METADATA FOOTER
+        # -------------------------------------------------------------
+        console.print(
+            f"[dim]Target: {tgt.upper()} | Execution Time: {elapsed:.1f}ms | Status: [green]Verified Read-Only[/green][/dim]\n"
+        )
+
+    def read_multiline_sql(self, first_line: str = "") -> str:
+        """Reads multiline SQL input until a semicolon (;) is entered."""
+        lines = [first_line] if first_line else []
+        if lines and lines[0].strip().endswith(";"):
+            return lines[0].strip()
+
+        while True:
+            try:
+                line = input("...  " if lines else "SQL> ")
+                if not line.strip() and lines:
+                    continue
+                lines.append(line)
+                if line.strip().endswith(";"):
+                    break
+            except (KeyboardInterrupt, EOFError):
+                return ""
+        return "\n".join(lines).strip()
+
+    def inspect_tables(self) -> None:
+        """Displays accessible tables for the active target database."""
+        try:
+            inspector = SchemaInspector(target=self.active_target)
+            tables = inspector.get_table_names()
+            tbl_table = Table(
+                title=f"Accessible Tables in [{self.active_target.upper()}]",
+                border_style="cyan",
+                header_style="bold yellow",
+            )
+            tbl_table.add_column("#", style="dim", width=4)
+            tbl_table.add_column("Table Name", style="bold green")
+            for idx, tbl in enumerate(tables, 1):
+                tbl_table.add_row(str(idx), tbl)
+            console.print("\n")
+            console.print(tbl_table)
+            console.print(f"[dim]Discovered {len(tables)} tables via MCP schema inspection.[/dim]\n")
+        except Exception as exc:
+            console.print(f"[bold red]Failed to inspect tables:[/bold red] {exc}")
 
     def run_benchmark_suite(self) -> None:
-        """Executes the full Spider 2.0 10-category regression suite and renders results."""
-        console.print("\n[bold cyan]=== Running Full Problem 1 Regression Suite (10 Failure Modes) ===[/bold cyan]\n")
+        """Runs the 10 Spider 2.0 failure mode regression suite."""
+        console.print("\n[bold cyan]=== Running Spider 2.0 Analytical Regression Suite (10 Failure Modes) ===[/bold cyan]\n")
         records = run_full_problem1_benchmark(executor=self.executor, target="local")
 
-        table = Table(title="Problem 1 Spider 2.0 Failure Modes Evaluation", border_style="bright_blue")
+        table = Table(title="Spider 2.0 Failure Modes Evaluation", border_style="bright_blue")
         table.add_column("Case ID", style="bold yellow", width=8)
         table.add_column("Spider 2.0 Failure Mode", style="white")
         table.add_column("Exec", style="green", width=7)
@@ -135,532 +302,16 @@ class InteractiveConsole:
         console.print(
             f"\n[bold green]Suite Complete:[/bold green] [bold]{passed_count} Regression Benchmarks PASSED with Exact Ground Truth[/bold], "
             f"[bold]{audited_count} Analytical Patterns Audited[/bold] ({len(records)}/{len(records)} total).\n"
-            f"[dim]As specified in benchmark rules, execution accuracy and analytical plan correctness are tracked separately.[/dim]\n"
         )
-
-    def run_problem2_schema_evaluation(self) -> None:
-        """Executes Stage 7 Enterprise Schema Linking Evaluation Suite (Problem 2)."""
-        console.print("\n[bold cyan]=== Running Problem 2: Two-Stage Schema Linking Evaluation ===[/bold cyan]\n")
-        report = Problem2RetrievalEvaluator.run_benchmark(embedding_backend="auto")
-
-        summary = Table(title="Stage 7 Retrieval Metrics (Aggregated)", border_style="bright_blue")
-        summary.add_column("Metric", style="bold yellow")
-        summary.add_column("Value", style="bold green")
-        summary.add_row("Indexed Enterprise Catalog", f"{report.total_tables_indexed} tables / {report.total_columns_indexed} fields")
-        summary.add_row("Table Recall@K", f"{report.mean_table_recall_at_k:.2%}")
-        summary.add_row("Column Recall@K", f"{report.mean_column_recall_at_k:.2%}")
-        summary.add_row("Table Precision@K / Col Precision@K", f"{report.mean_table_precision_at_k:.2%} / {report.mean_column_precision_at_k:.2%}")
-        summary.add_row("Mean Reciprocal Rank (Table MRR / Col MRR)", f"{report.mean_reciprocal_rank:.3f} / {report.mean_column_mrr:.3f}")
-        summary.add_row("Mean Schema Token Reduction", f"{report.mean_token_reduction_pct:.1f}%")
-        summary.add_row("Mean Retrieval Latency", f"{report.mean_retrieval_latency_ms:.2f} ms")
-        summary.add_row("DB-Evidenced Literal Accuracy", f"{report.literal_resolution_accuracy:.2%}")
-        console.print(summary)
-
-        cases_tbl = Table(title="Per-Case Retrieval Breakdown", border_style="cyan")
-        cases_tbl.add_column("ID", style="bold yellow", width=7)
-        cases_tbl.add_column("Scenario", style="white")
-        cases_tbl.add_column("Tbl R@K", style="green", width=8)
-        cases_tbl.add_column("Col R@K", style="green", width=8)
-        cases_tbl.add_column("MRR", style="cyan", width=6)
-        cases_tbl.add_column("Token Save", style="magenta", width=11)
-        cases_tbl.add_column("Latency", style="dim", width=10)
-        for cr in report.case_results:
-            cases_tbl.add_row(
-                cr.case_id,
-                cr.category,
-                f"{cr.table_recall_at_k:.0%}",
-                f"{cr.column_recall_at_k:.0%}",
-                f"{cr.table_reciprocal_rank:.2f}",
-                f"{cr.token_reduction_pct:.1f}%",
-                f"{cr.retrieval_latency_ms:.1f} ms",
-            )
-        console.print("\n")
-        console.print(cases_tbl)
-        console.print(f"[dim]{report.scope_disclaimer}[/dim]\n")
-
-    def run_problem1_analysis(self, question: str, target: Optional[str] = None) -> None:
-        """Runs the complete Problem 1 Baseline vs Improved analysis and displays Rich comparison."""
-        tgt = target or self.active_target
-        dialect = "sqlite" if tgt.lower() == "local" else "postgres"
-        console.print(f"\n[bold cyan]=== Evaluating Question on [{tgt.upper()} / {dialect.upper()}] ===[/bold cyan]")
-        console.print(f"[bold italic white]\"{question}\"[/bold italic white]\n")
-
-        contract, _ = self.generator.decompose_question(question)
-
-        # 1. Show Analytical Contract
-        contract_table = Table(title="Decomposed Analytical Contract", border_style="cyan", show_header=False)
-        contract_table.add_column("Field", style="bold yellow")
-        contract_table.add_column("Specification", style="white")
-        contract_table.add_row("Metric Name", contract.metric_name)
-        contract_table.add_row("Target Grain Entity", f"[bold green]{contract.target_entity}[/bold green]")
-        contract_table.add_row("Requires DISTINCT?", str(contract.requires_distinct_entity_count))
-        contract_table.add_row("Is Percentage?", str(contract.is_percentage))
-        contract_table.add_row("Baseline Cohort", contract.baseline_cohort_filter or "Full Population")
-        contract_table.add_row("Returning Filter", contract.returning_cohort_filter or "Active Subset")
-        console.print(contract_table)
-
-        # 1b. Show Two-Stage Schema Linking Summary (Problem 2)
-        schema_ctx = self.generator.get_schema_context(question, target=tgt)
-        if schema_ctx is not None and schema_ctx.candidate_tables:
-            schema_tbl = Table(
-                title=(
-                    f"Two-Stage Schema Linking (Latency: {schema_ctx.retrieval_latency_ms:.1f}ms | "
-                    f"Token Reduction: {schema_ctx.token_reduction_pct:.1f}%)"
-                ),
-                border_style="bright_blue",
-                show_header=True,
-            )
-            schema_tbl.add_column("Candidate Table", style="bold yellow")
-            schema_tbl.add_column("Score", style="green", width=7)
-            schema_tbl.add_column("Pruned Columns", style="cyan")
-            for sec in schema_ctx.candidate_tables:
-                col_list = ", ".join(c.path for c in sec.selected_columns)
-                schema_tbl.add_row(
-                    sec.full_name,
-                    f"{sec.similarity_score:.2f}",
-                    f"({len(sec.selected_columns)}/{sec.total_table_columns}) {col_list}",
-                )
-            console.print("\n")
-            console.print(schema_tbl)
-
-        # 2. Show Structured CTE Logic Plan (Mechanism A)
-        plan = self.planner.plan_question(question, target_dialect=dialect, schema_context=schema_ctx)
-        cte_table = Table(title=f"Structured CTE Logic Plan ({len(plan.cte_steps)} Decomposed Steps)", border_style="cyan", show_header=True)
-        cte_table.add_column("#", style="dim", width=3)
-        cte_table.add_column("CTE Name", style="bold yellow")
-        cte_table.add_column("Purpose", style="white")
-        cte_table.add_column("Inputs", style="cyan")
-        cte_table.add_column("Dependencies", style="dim magenta")
-        cte_table.add_column("Output Grain", style="bold green")
-        for idx, step in enumerate(plan.cte_steps, 1):
-            cte_table.add_row(
-                str(idx),
-                step.step_name,
-                step.purpose,
-                ", ".join(step.input_tables),
-                ", ".join(step.dependencies) if step.dependencies else "(None)",
-                step.expected_output_grain,
-            )
-        console.print("\n")
-        console.print(cte_table)
-
-        # 3. Show Dialect Function RAG Recommendations (Mechanism B)
-        rag_funcs = self.dialect_rag.retrieve_functions(question, target_dialect=dialect, limit=3)
-        if rag_funcs:
-            rag_table = Table(title=f"Retrieved Dialect Function Documentation [{dialect.upper()}]", border_style="magenta", show_header=True)
-            rag_table.add_column("Function", style="bold yellow")
-            rag_table.add_column("Category", style="cyan")
-            rag_table.add_column("Syntax", style="white")
-            rag_table.add_column("Dialect Rule / Caveat", style="italic")
-            for rf in rag_funcs:
-                rag_table.add_row(rf.name, rf.category, rf.syntax_pattern, rf.caveats_and_pitfalls or rf.description)
-            console.print("\n")
-            console.print(rag_table)
-
-        # 4. Schema Grounding: Resolve Categorical Literals via MCP
-        grounded_literals = self.executor.resolve_categorical_literals_sync(question, target=tgt)
-        if grounded_literals:
-            lit_table = Table(title="Discovered Database Literals (Schema Grounding via MCP)", border_style="magenta", show_header=True)
-            lit_table.add_column("Natural Language Term", style="bold yellow")
-            lit_table.add_column("Target Table & Column", style="white")
-            lit_table.add_column("Database Cell Value", style="bold green")
-            lit_table.add_column("Match Type", style="dim")
-            for m in grounded_literals:
-                lit_table.add_row(m["term"], f"{m['table_name']}.{m['column_name']}", f"'{m['database_literal']}'", m["match_type"])
-            console.print("\n")
-            console.print(lit_table)
-
-        # 1c. Schema Linking & Pruning (Problem 2 via MCP)
-        try:
-            prune_res = self.executor.prune_schema_sync(question, target=tgt)
-            if prune_res and prune_res.get("candidate_tables"):
-                cand_tables = ", ".join(prune_res["candidate_tables"])
-                reduction = prune_res.get("token_reduction_pct", 0.0)
-                join_paths = prune_res.get("discovered_join_paths", [])
-                prune_summary = (
-                    f"[bold green]Candidate Tables:[/bold green] {cand_tables}\n"
-                    f"[bold cyan]Token Reduction:[/bold cyan] [bold]{reduction:.1f}%[/bold] "
-                    f"({prune_res.get('pruned_total_columns', 0)} of {prune_res.get('original_total_columns', 0)} columns kept)\n"
-                )
-                if join_paths:
-                    prune_summary += f"[bold yellow]Discovered Join Keys:[/bold yellow] {', '.join(join_paths)}"
-                console.print(Panel(prune_summary, title="Problem 2: Schema Linking & Context Pruner (via MCP)", border_style="cyan"))
-        except Exception:
-            pass
-        # Helper to convert numeric outputs safely
-        def safe_float(val: Any) -> Optional[float]:
-            try:
-                return float(val) if val is not None else None
-            except (ValueError, TypeError):
-                return None
-
-        # 5. Execute Naive Baseline Pipeline
-        gen_base = self.generator.generate_baseline_sql(question, target=tgt)
-        res_base = self.executor.execute_readonly_sql_sync(gen_base.generated_sql, target=tgt)
-        raw_base_first = list(res_base["rows"][0].values())[0] if res_base.get("rows") else None
-        val_base = validate_semantic_analysis(
-            gen_base.generated_sql,
-            contract=contract,
-            actual_result=safe_float(raw_base_first),
-            dialect=dialect,
-        )
-        base_val = raw_base_first if raw_base_first is not None else "N/A"
-
-        # 6. Execute Execution-Grounded Debugging Loop (Improved Pipeline)
-        t0 = time.time()
-        debug_res = self.debugger.execute_with_debugging(question, target=tgt)
-        elapsed = (time.time() - t0) * 1000
-
-        val_imp = debug_res.semantic_report
-        imp_val = debug_res.raw_result if debug_res.raw_result is not None else "N/A"
-
-        # 7. Self-Repair Diagnostics Trace (if retried)
-        if len(debug_res.history) > 1:
-            trace_table = Table(title="Execution Debugger Cyclic Self-Repair Trace", border_style="yellow")
-            trace_table.add_column("Attempt", style="bold yellow", width=8)
-            trace_table.add_column("Error Category", style="red")
-            trace_table.add_column("Diagnosed Failure", style="white")
-            trace_table.add_column("Repair Guidance Injected", style="green")
-            for att in debug_res.history:
-                trace_table.add_row(
-                    f"#{att.attempt_index}",
-                    att.error_category.value if att.error_category else "None",
-                    att.error_message or "None",
-                    att.repair_advice or "None",
-                )
-            console.print("\n")
-            console.print(trace_table)
-
-        # 8. Display SQL Side-by-Side
-        console.print("\n[bold red]Pipeline A: Naive Baseline SQL (Collapse Mode):[/bold red]")
-        console.print(Syntax(gen_base.generated_sql, "sql", theme="monokai", line_numbers=True))
-
-        console.print("\n[bold green]Pipeline B: Debugged / Improved CTE SQL (Semantically Guarded):[/bold green]")
-        console.print(Syntax(debug_res.final_sql, "sql", theme="monokai", line_numbers=True))
-
-        # 9. Comparison Table or Data Table
-        if contract.is_percentage:
-            comp_table = Table(title="Benchmark Comparison Results", border_style="bright_blue")
-            comp_table.add_column("Dimension", style="bold")
-            comp_table.add_column("Naive Baseline", style="red")
-            comp_table.add_column("Improved MCP (Debugged)", style="green")
-
-            base_status = "SUCCESS (0 Errors)" if res_base.get("success") else "FAILED"
-            imp_status = "SUCCESS (0 Errors)" if debug_res.success else "FAILED"
-
-            comp_table.add_row("SQL Execution", base_status, imp_status)
-            comp_table.add_row("Calculated Result", f"{base_val}%", f"[bold]{imp_val}%[/bold]")
-            comp_table.add_row(
-                "Semantic Status",
-                "[bold red]FAILED[/bold red]" if not val_base.is_semantically_sound else "[bold green]SOUND[/bold green]",
-                "[bold green]PASSED (Sound)[/bold green]" if val_imp.is_semantically_sound else "[bold red]FAILED[/bold red]",
-            )
-            comp_table.add_row("Counting Grain", val_base.detected_grain, val_imp.detected_grain)
-            comp_table.add_row("Safe Math Guard?", str(val_base.has_safe_division), str(val_imp.has_safe_division))
-            comp_table.add_row("Join Filter Leak?", str(val_base.has_join_filter_leak), str(val_imp.has_join_filter_leak))
-            console.print("\n")
-            console.print(comp_table)
-        else:
-            # Render returned tabular records
-            rows = debug_res.rows
-            cols = debug_res.columns
-            if rows:
-                data_table = Table(title=f"Query Output ({len(rows)} rows)", border_style="green", header_style="bold cyan")
-                for c in cols:
-                    data_table.add_column(str(c))
-                for r in rows:
-                    data_table.add_row(*[str(r.get(c, "")) for c in cols])
-                console.print("\n")
-                console.print(data_table)
-            else:
-                console.print("\n[bold yellow]Query executed successfully via MCP, but returned 0 rows.[/bold yellow]")
-                state_filters = [m for m in grounded_literals if m.get("table_name") == "outlets" and m.get("column_name") == "state_name"]
-                if state_filters:
-                    searched_state = state_filters[0].get("database_literal")
-                    try:
-                        available_states = LiteralResolver(target=tgt).get_distinct_column_literals("outlets", "state_name")
-                        if searched_state not in available_states:
-                            console.print(
-                                f"[dim cyan]Note: '{searched_state}' does not have any branches/outlets in this database.\n"
-                                f"Available states are: {', '.join(sorted(available_states))}[/dim cyan]\n"
-                            )
-                    except Exception:
-                        pass
-
-        # 10. Diagnosed Pitfalls Alert
-        if val_base.errors or val_base.warnings:
-            pitfalls = "\n".join([f"[red][ERROR][/red] {e}" for e in val_base.errors] + [f"[yellow][WARNING][/yellow] {w}" for w in val_base.warnings])
-            console.print(Panel(f"[bold red]Detected Pitfalls in Baseline Query:[/bold red]\n{pitfalls}", border_style="red"))
-
-        console.print(f"[dim]Executed via MCP client & debugger in {elapsed:.1f}ms[/dim]\n")
-
-    def run_direct_sql(self, sql: str) -> None:
-        """Executes custom SQL through MCP with real-time AST safety and displays rich table."""
-        console.print(f"\n[bold cyan]Validating & Executing via MCP on [{self.active_target.upper()}]:[/bold cyan]")
-        console.print(Syntax(sql, "sql", theme="monokai"))
-
-        # Step 1: Pre-execution AST security check
-        report = validate_readonly_sql(sql)
-        if not report.is_valid:
-            error_msg = f"[bold red]AST SECURITY VIOLATION REJECTED:[/bold red]\n{report.error}"
-            console.print(Panel(error_msg, border_style="bold red"))
-            return
-
-        # Step 2: Safe execution via MCP
-        t0 = time.time()
-        res = self.executor.execute_readonly_sql_sync(sql, target=self.active_target)
-        elapsed = (time.time() - t0) * 1000
-
-        if not res.get("success"):
-            console.print(Panel(f"[bold red]Database Execution Error:[/bold red]\n{res.get('error')}", border_style="red"))
-            return
-
-        rows = res.get("rows", [])
-        columns = res.get("columns", [])
-
-        if not rows:
-            console.print("[yellow]Query executed successfully, but returned 0 rows.[/yellow]\n")
-            return
-
-        # Step 3: Render formatted data table
-        table = Table(
-            title=f"Query Output ({len(rows)} rows returned in {elapsed:.1f}ms)",
-            border_style="green",
-            show_header=True,
-            header_style="bold cyan",
-        )
-        for col in columns:
-            table.add_column(str(col))
-
-        for r in rows:
-            table.add_row(*[str(r.get(c, "")) for c in columns])
-
-        console.print(table)
-        console.print(f"[dim]Verified read-only query executed in {elapsed:.1f}ms via MCP.[/dim]\n")
-
-    def read_multiline_sql(self, first_line: str = "") -> str:
-        """Reads multiline SQL input until a semicolon (;) is entered."""
-        lines = [first_line] if first_line else []
-        if lines and lines[0].strip().endswith(";"):
-            return lines[0].strip()
-
-        while True:
-            try:
-                line = input("...  " if lines else "SQL> ")
-                if not line.strip() and lines:
-                    break
-                lines.append(line)
-                if line.strip().endswith(";"):
-                    break
-            except (KeyboardInterrupt, EOFError):
-                break
-        return "\n".join(lines).strip()
-
-    def inspect_tables(self) -> None:
-        """Displays interactive overview of live database tables."""
-        inspector = SchemaInspector(target=self.active_target)
-        tables = inspector.get_table_names()
-
-        table = Table(title=f"Accessible Tables in [{self.active_target.upper()}]", border_style="blue")
-        table.add_column("#", style="dim", width=4)
-        table.add_column("Table Name", style="bold white")
-        table.add_column("Columns", style="cyan")
-
-        for idx, tbl in enumerate(tables, 1):
-            cols = [c["name"] for c in inspector.get_table_columns(tbl)]
-            table.add_row(str(idx), tbl, ", ".join(cols[:6]) + ("..." if len(cols) > 6 else ""))
-
-        console.print(table)
-        console.print("[dim]Use command 5 to query any table with SELECT.[/dim]\n")
-
-    def inspect_schema_pruning(self, question: Optional[str] = None) -> None:
-        """Runs Problem 2 Coarse Table & Fine Column Pruning and displays token savings."""
-        if not question:
-            console.print("\n[bold cyan]Problem 2 Schema Linking & Context Pruner Sandbox[/bold cyan]")
-            console.print("[dim]Choose a preset question or type your own:[/dim]")
-            console.print("  [yellow]a)[/yellow] Show staff attendance for casual leave in June by cluster")
-            console.print("  [yellow]b)[/yellow] What is the rejection rate for individual loans by product?")
-            console.print("  [yellow]c)[/yellow] Compare branch outlet targets against overdue daily balances")
-            choice = Prompt.ask("Enter question (or preset a/b/c)").strip()
-            if choice.lower() == "a":
-                question = "Show staff attendance for casual leave in June by cluster"
-            elif choice.lower() == "b":
-                question = "What is the rejection rate for individual loans by product?"
-            elif choice.lower() == "c":
-                question = "Compare branch outlet targets against overdue daily balances"
-            elif choice:
-                question = choice
-            else:
-                question = "Show staff attendance for casual leave in June by cluster"
-
-        console.print(f"\n[bold cyan]=== Problem 2: Schema Linking & Context Pruner ===[/bold cyan]")
-        console.print(f"[bold italic white]\"{question}\"[/bold italic white]\n")
-
-        res = self.executor.prune_schema_sync(question, target=self.active_target)
-        table_scores = res.get("table_scores", [])
-        discovered_paths = res.get("discovered_join_paths", [])
-        reduction_pct = res.get("token_reduction_pct", 0.0)
-        orig_cols = res.get("original_total_columns", 0)
-        pruned_cols = res.get("pruned_total_columns", 0)
-
-        # 1. Coarse Table Pruning Ranking Table
-        table_rank = Table(title="1. Coarse Table Pruning & Relevance Ranking", border_style="cyan")
-        table_rank.add_column("Table Name", style="bold")
-        table_rank.add_column("Relevance Score", justify="right")
-        table_rank.add_column("Status", justify="center")
-        table_rank.add_column("Relevance Rationale / Grounding Reason", style="dim")
-
-        for ts in table_scores:
-            status_text = "[bold green]SELECTED[/bold green]" if ts["is_selected"] else "[dim red]PRUNED[/dim red]"
-            score_style = "bold green" if ts["is_selected"] else "dim"
-            reasons = "; ".join(ts["relevance_reasons"]) if ts["relevance_reasons"] else "No query/literal overlap"
-            table_rank.add_row(ts["table_name"], f"[{score_style}]{ts['score']:.1f}[/{score_style}]", status_text, reasons)
-
-        console.print(table_rank)
-
-        # 2. Join Path Continuity
-        if discovered_paths:
-            path_panel = "\n".join([f"  • [bold yellow]{p}[/bold yellow]" for p in discovered_paths])
-            console.print(Panel(f"[bold green]Discovered Join Keys (Preserving Relational Continuity):[/bold green]\n{path_panel}", border_style="yellow"))
-
-        # 3. Fine Column Pruning & Token Savings Metric
-        pruned_schemas = res.get("pruned_schemas", {})
-        col_table = Table(title=f"2. Fine Column Pruning (Context Bloat Reduction: {reduction_pct:.1f}%)", border_style="green")
-        col_table.add_column("Candidate Table", style="bold yellow")
-        col_table.add_column("Original", justify="center")
-        col_table.add_column("Retained", justify="center", style="bold green")
-        col_table.add_column("Dropped", justify="center", style="dim red")
-        col_table.add_column("Selected Essential Columns (PK / FK / Metrics)", style="white")
-
-        for tbl, ps in pruned_schemas.items():
-            kept_names = [f"[bold]{c['name']}[/bold]" if c.get("is_primary_key") or c.get("is_pk") else c["name"] for c in ps["selected_columns"]]
-            col_table.add_row(
-                tbl,
-                str(ps["original_column_count"]),
-                str(ps["pruned_column_count"]),
-                str(len(ps["dropped_columns"])),
-                ", ".join(kept_names),
-            )
-
-        console.print(col_table)
-
-        # 4. Compact Schema Card Output
-        card = res.get("compact_schema_markdown", "")
-        if card:
-            console.print(Panel(card, title="3. Generated Compact Markdown Schema Card for LLM Context", border_style="bright_blue"))
-
-        console.print(f"[bold cyan]Result:[/bold cyan] Reduced schema context from [red]{orig_cols}[/red] to [bold green]{pruned_cols}[/bold green] columns ([bold]{reduction_pct:.1f}% token reduction[/bold]), eliminating hallucinations and context bloat.\n")
-
-    def inspect_join_paths(self) -> None:
-        """Explores shortest join paths between two tables using graph BFS."""
-        console.print("\n[bold cyan]Problem 2 Relational Knowledge Graph Join Discovery[/bold cyan]")
-        tables = SchemaInspector(target=self.active_target).get_table_names()
-        console.print(f"[dim]Available tables: {', '.join(tables)}[/dim]")
-
-        t1 = Prompt.ask("Enter source table (e.g. staff_attendance)").strip().lower()
-        t2 = Prompt.ask("Enter target table (e.g. outlets)").strip().lower()
-
-        if not t1 or not t2:
-            return
-
-        res = self.executor.find_join_path_sync(t1, t2, target=self.active_target)
-        if res.get("found_path"):
-            path_len = res.get("path_length")
-            predicates = res.get("join_predicates", [])
-            steps_desc = "\n".join([f"  {idx+1}. [bold yellow]{pred}[/bold yellow]" for idx, pred in enumerate(predicates)])
-            console.print(Panel(
-                f"[bold green]Shortest Join Path Found ({path_len} hop{'s' if path_len > 1 else ''}):[/bold green]\n{steps_desc}",
-                border_style="green",
-            ))
-        else:
-            console.print(Panel(f"[bold red]No relational join path found between '{t1}' and '{t2}'.[/bold red]", border_style="red"))
-
-
-    def run_problem3_evaluation(self) -> None:
-        """Executes Spider 2.0 Problem 3 Benchmark Suite (Doc Grounding & Autonomous Exploration)."""
-        console.print("\n[bold cyan]=== Running Spider 2.0 Problem 3 Benchmark: Documentation Grounding & Exploration ===[/bold cyan]\n")
-        report = Problem3Evaluator.run_benchmark(embedding_backend="hash")
-
-        table = Table(title="Spider 2.0 Problem 3 Evaluation Results (10 Test Cases)", border_style="bright_blue")
-        table.add_column("Case ID", style="bold yellow", width=8)
-        table.add_column("Domain", style="cyan", width=12)
-        table.add_column("Target Metric", style="white", width=25)
-        table.add_column("Doc Match", justify="center", width=10)
-        table.add_column("Baseline", justify="center", width=10)
-        table.add_column("Problem 3", justify="center", width=10)
-        table.add_column("Exploration", justify="center", width=12)
-
-        for c in report.case_results:
-            doc_str = "[bold green]MATCH[/bold green]" if c.doc_retrieved_correctly else "[dim red]MISS[/dim red]"
-            p3_str = "[bold green]COMPLIANT[/bold green]" if c.problem3_compliant else "[bold red]FAIL[/bold red]"
-            base_str = "[dim red]NON-COMPL[/dim red]"
-            exp_str = "[bold cyan]PROBED[/bold cyan]" if c.exploration_performed else "[dim]N/A[/dim]"
-            table.add_row(c.case_id, c.domain, c.target_metric, doc_str, base_str, p3_str, exp_str)
-
-        console.print(table)
-        console.print(
-            f"\n[bold green]Problem 3 Benchmark Summary:[/bold green] "
-            f"[bold]Doc Grounding Accuracy: {report.doc_grounding_accuracy:.1f}%[/bold] | "
-            f"[bold]Problem 3 Metric Compliance: {report.problem3_compliance_rate:.1f}%[/bold] | "
-            f"[bold]Baseline Compliance: {report.baseline_compliance_rate:.1f}%[/bold] "
-            f"({report.total_cases}/{report.total_cases} cases passed).\n"
-        )
-
-    def search_documentation_knowledge_base(self) -> None:
-        """Searches the business rulebooks and metrics knowledge base (Doc RAG)."""
-        console.print("\n[bold cyan]Problem 3 External Documentation & Business Metric Search[/bold cyan]")
-        query = Prompt.ask("Enter business concept, metric name, or rule to search").strip()
-        if not query:
-            return
-
-        retriever = DocumentationRetriever(in_memory=True, embedding_backend="hash")
-        res = retriever.retrieve_documentation(query=query, top_k=3)
-
-        if res.matched_metrics:
-            m_table = Table(title="Matched Enterprise Business Metrics", border_style="green")
-            m_table.add_column("Metric Name", style="bold yellow")
-            m_table.add_column("Domain", style="cyan")
-            m_table.add_column("Formula / Calculation", style="white")
-            m_table.add_column("Required Tables", style="dim")
-            for m in res.matched_metrics:
-                m_table.add_row(m.name, m.domain, m.calculation_formula_sql, ", ".join(m.required_tables))
-            console.print(m_table)
-
-        if res.formatted_prompt_block:
-            console.print(Panel(res.formatted_prompt_block, title="Formatted Grounding Prompt Context for LLM", border_style="cyan"))
-
-    def run_autonomous_diagnostic_probes(self) -> None:
-        """Runs interactive exploratory probes on the active database."""
-        console.print(f"\n[bold cyan]Problem 3 Autonomous Database Exploration [{self.active_target.upper()}][/bold cyan]")
-        q = Prompt.ask("Enter query topic or question to explore data for").strip()
-        if not q:
-            return
-
-        explorer = DatabaseExplorer()
-        report = explorer.explore_for_query(q, target=self.active_target)
-
-        table = Table(title=f"Diagnostic Probes Executed ({len(report.probes_run)} probes)", border_style="yellow")
-        table.add_column("Probe Type", style="bold cyan")
-        table.add_column("Table / Target", style="white")
-        table.add_column("Finding Summary", style="green")
-        table.add_column("Anomaly", style="bold red")
-
-        for p in report.probes_run:
-            table.add_row(p.probe_type.value, p.table_name, p.finding_summary, p.anomaly_detail or "None")
-
-        console.print(table)
-        if report.exploration_guidance:
-            console.print(Panel(report.exploration_guidance, title="Exploration Guidance for SQL Generation", border_style="green"))
 
     def start_loop(self) -> None:
         """Main REPL loop."""
         self.print_banner()
-        self.print_menu()
 
         while True:
             try:
                 user_input = Prompt.ask(
-                    f"\n[bold yellow]text2sql[/bold yellow] ([cyan]{self.active_target}[/cyan])"
+                    f"\n[bold yellow]Query[/bold yellow] ([cyan]{self.active_target}[/cyan])"
                 ).strip()
 
                 if not user_input:
@@ -672,68 +323,47 @@ class InteractiveConsole:
                     console.print("[bold green]Goodbye![/bold green]")
                     break
 
-                elif cmd in ("help", "menu", "?"):
-                    self.print_menu()
+                elif cmd in ("help", "?"):
+                    console.print(
+                        "\n[bold cyan]Command Cheatsheet:[/bold cyan]\n"
+                        "  • [yellow]target[/yellow] / [yellow]switch[/yellow]  - Toggle between PostgreSQL and local SQLite\n"
+                        "  • [yellow]bench[/yellow]               - Run 10-case Spider 2.0 regression benchmarks\n"
+                        "  • [yellow]tables[/yellow] / [yellow]schema[/yellow]  - List accessible tables in active database\n"
+                        "  • [yellow]clear[/yellow] / [yellow]cls[/yellow]        - Clear terminal screen\n"
+                        "  • [yellow]exit[/yellow] / [yellow]quit[/yellow]       - Exit console\n"
+                        "  • [white]<text question>[/white]      - Any natural language query (e.g. 'Show outlets in Maharashtra')\n"
+                        "  • [white]<sql statement>[/white]      - Any SELECT/WITH query (validated and executed safely)\n"
+                    )
 
-                elif cmd == "1":
-                    # Preset 1: User Retention
-                    q = "What percentage of users who signed up in January returned in February?"
-                    self.run_problem1_analysis(q, target="local")
-
-                elif cmd == "2":
-                    # Preset 2: Staff Attendance
-                    q = "What percentage of our staff members were marked present in June 2026?"
-                    self.run_problem1_analysis(q, target="postgres")
-
-                elif cmd == "3":
-                    # Preset 3: Loan Payout
-                    q = "What percentage of group loans created in May 2026 reached the Payout stage?"
-                    self.run_problem1_analysis(q, target="postgres")
-
-                elif cmd == "4":
-                    self.inspect_tables()
-
-                elif cmd == "5":
-                    console.print("[bold green]Paste or type SQL query (end with ';' and press Enter):[/bold green]")
-                    sql = self.read_multiline_sql()
-                    if sql.strip():
-                        self.run_direct_sql(sql)
-
-                elif cmd == "6":
-                    # Toggle database target
+                elif cmd in ("target", "switch"):
                     self.active_target = "local" if self.active_target == "postgres" else "postgres"
-                    console.print(f"[bold yellow]Switched target database to:[/bold yellow] [bold green]{self.active_target.upper()}[/bold green]\n")
+                    target_desc = (
+                        f"{self.settings.postgres_db} on {self.settings.postgres_host}"
+                        if self.active_target == "postgres"
+                        else "local_problem1.db (SQLite)"
+                    )
+                    console.print(
+                        f"[bold yellow]Switched target database to:[/bold yellow] [bold green]{self.active_target.upper()}[/bold green] "
+                        f"([dim]{target_desc}[/dim])\n"
+                    )
 
-                elif cmd == "7":
+                elif cmd in ("bench", "benchmark"):
                     self.run_benchmark_suite()
 
-                elif cmd == "8":
-                    self.run_problem2_schema_evaluation()
+                elif cmd in ("tables", "schema"):
+                    self.inspect_tables()
 
-                elif cmd == "9":
-                    self.inspect_schema_pruning()
-
-                elif cmd == "10":
-                    self.inspect_join_paths()
-
-                elif cmd == "11":
-                    self.run_problem3_evaluation()
-
-                elif cmd == "12":
-                    self.search_documentation_knowledge_base()
-
-                elif cmd == "13":
-                    self.run_autonomous_diagnostic_probes()
+                elif cmd in ("clear", "cls"):
+                    os.system("cls" if os.name == "nt" else "clear")
+                    self.print_banner()
 
                 elif user_input.upper().startswith("SELECT ") or user_input.upper().startswith("WITH "):
-                    # User typed or pasted a multi-line SQL query directly
                     sql = self.read_multiline_sql(first_line=user_input)
                     if sql.strip():
                         self.run_direct_sql(sql)
 
                 else:
-                    # User typed a natural language question
-                    self.run_problem1_analysis(user_input)
+                    self.run_query(user_input)
 
             except (KeyboardInterrupt, EOFError):
                 console.print("\n[bold green]Session ended. Goodbye![/bold green]")

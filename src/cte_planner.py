@@ -645,19 +645,291 @@ class CTEPlanner:
         self.validator.validate_plan(plan)
         return plan
 
+    @staticmethod
+    def needs_cte_decomposition(
+        question: str,
+        schema_context: Optional[Any] = None,
+    ) -> bool:
+        """Determines whether a question strictly requires multi-step CTE decomposition.
+
+        Complex queries requiring CTE decomposition:
+        - Multi-period cohort retention / user churn analysis (independent time windows).
+        - Multi-table pre-aggregation to prevent Cartesian fan-out (e.g. combined group + individual loans).
+        - Asymmetric ratio metrics where numerator filters leak from denominator (e.g. attendance rate).
+        - Queries requiring window functions (ranking, deduplication, row_number).
+        - Multi-stage business rules (NPA, 90+ DPD, effective attendance).
+
+        Simple queries (Adaptive Direct):
+        - Direct table scans, single-table filters, simple group-bys, lookups, and basic counts.
+        """
+        q = question.lower()
+
+        # 1. Cohort / Retention / Churn / Multi-period tracking
+        if "retention" in q or ("signup" in q and "return" in q) or ("january" in q and "february" in q):
+            return True
+        if "cohort" in q or "churn" in q or ("period" in q and "previous" in q):
+            return True
+
+        # 2. Multi-table aggregation fan-out risk (joining unaggregated tables)
+        if "payout" in q and ("both" in q or ("group" in q and "individual" in q) or "combined" in q):
+            return True
+
+        # 3. Asymmetric ratio metrics where numerator filter could leak denominator
+        if "staff" in q and ("attendance" in q or "present" in q or "rate" in q or "%" in q):
+            return True
+        if "attendance rate" in q or "attendance percentage" in q or "present rate" in q:
+            return True
+
+        # 4. Multi-stage metric calculations
+        if any(tok in q for tok in ("npa", "dpd", "gross loan portfolio", "collection efficiency", "effective attendance")):
+            return True
+
+        # 5. Window function requirements (deduplication, ranking)
+        if any(tok in q for tok in ("rank", "dense_rank", "row_number", "top 1 per", "most recent per", "latest per")):
+            return True
+
+        # 6. Schema context check: if multiple candidate tables or complex aggregation/metric requirements
+        if schema_context is not None:
+            ctx_tables = list(getattr(schema_context, "selected_table_names", None) or [])
+            if isinstance(schema_context, dict):
+                ctx_tables = list(schema_context.get("selected_table_names", []))
+            if len(ctx_tables) > 1 or any(tok in q for tok in ("sum", "total", "avg", "average", "ratio", "rate", "overdue", "amount")):
+                return True
+
+        return False
+
+    def create_direct_query_plan(
+        self,
+        question: str,
+        target_dialect: Optional[str] = None,
+        schema_context: Optional[Any] = None,
+    ) -> LogicPlan:
+        """Constructs an Adaptive Direct query plan (0 CTEs) for simple lookups and aggregations."""
+        dialect = normalize_dialect(target_dialect or self.target_dialect)
+        q_lower = question.lower()
+
+        # If schema_context is provided, ground columns and filters from it
+        if schema_context is not None:
+            ctx_tables = list(getattr(schema_context, "selected_table_names", None) or [])
+            if isinstance(schema_context, dict):
+                ctx_tables = list(schema_context.get("selected_table_names", []))
+
+            if ctx_tables:
+                primary_table = ctx_tables[0]
+                candidate_sections = getattr(schema_context, "candidate_tables", None) or []
+                resolved_lits = getattr(schema_context, "resolved_literals", None) or []
+
+                selectable_cols: List[str] = []
+                if candidate_sections:
+                    primary_sec = candidate_sections[0]
+                    for col in getattr(primary_sec, "selected_columns", []):
+                        cname = getattr(col, "column_name", getattr(col, "path", ""))
+                        if cname and cname not in selectable_cols:
+                            selectable_cols.append(cname)
+                else:
+                    col_paths = list(getattr(schema_context, "selected_column_paths", None) or [])
+                    if isinstance(schema_context, dict):
+                        col_paths = list(schema_context.get("selected_column_paths", []))
+                    for cp in col_paths:
+                        parts = cp.split(".")
+                        if len(parts) >= 2 and parts[0] == primary_table and parts[1] not in selectable_cols:
+                            selectable_cols.append(parts[1])
+
+                filter_preds: List[str] = []
+                for lit in resolved_lits:
+                    ltbl = getattr(lit, "table_name", None) or (lit.get("table_name") if isinstance(lit, dict) else None)
+                    lpred = getattr(lit, "sql_predicate", None) or (lit.get("sql_predicate") if isinstance(lit, dict) else None)
+                    if ltbl == primary_table and lpred and lpred not in filter_preds:
+                        filter_preds.append(lpred)
+
+                is_count_intent = any(tok in q_lower for tok in ("how many", "count ", "total number", "number of"))
+                where_clause = f" WHERE {' AND '.join(filter_preds)}" if filter_preds else ""
+
+                if is_count_intent:
+                    direct_sql = f"SELECT COUNT(*) AS total_count FROM {primary_table}{where_clause};"
+                    grain = "single_row_aggregate"
+                else:
+                    cols_str = ", ".join(selectable_cols[:8]) if selectable_cols else "*"
+                    direct_sql = f"SELECT {cols_str} FROM {primary_table}{where_clause} LIMIT 25;"
+                    grain = f"{primary_table}_record"
+
+                return LogicPlan(
+                    query=question,
+                    target_dialect=dialect,
+                    strategy="Adaptive Direct: Single SELECT query without CTE overhead.",
+                    cte_steps=[],
+                    final_select=direct_sql,
+                    expected_output_grain=grain,
+                    validation_notes=f"Adaptive planner bypassed CTE overhead for simple query on '{primary_table}'.",
+                    planner_backend="adaptive_direct",
+                )
+
+        # Fallback simple direct queries grounded in domain schema
+        if "outlet" in q_lower:
+            if "count" in q_lower or "how many" in q_lower:
+                direct_sql = "SELECT COUNT(*) AS total_outlets FROM outlets;"
+                grain = "single_row_aggregate"
+            else:
+                direct_sql = "SELECT outlet_code, outlet_name, state_name, cluster_name, tier FROM outlets ORDER BY outlet_name LIMIT 15;"
+                grain = "outlet_record"
+        elif "staff" in q_lower:
+            if "by position" in q_lower:
+                direct_sql = "SELECT position, COUNT(*) AS staff_count FROM staff GROUP BY position ORDER BY staff_count DESC;"
+                grain = "position_aggregate"
+            elif "count" in q_lower or "how many" in q_lower:
+                direct_sql = "SELECT COUNT(*) AS total_staff FROM staff;"
+                grain = "single_row_aggregate"
+            else:
+                direct_sql = "SELECT staff_no, full_name, position, outlet_code FROM staff ORDER BY staff_no LIMIT 15;"
+                grain = "staff_record"
+        elif "group_loan" in q_lower or "group loan" in q_lower:
+            if "count" in q_lower or "how many" in q_lower:
+                direct_sql = "SELECT COUNT(*) AS total_loans FROM group_loans;"
+                grain = "single_row_aggregate"
+            else:
+                direct_sql = "SELECT loan_ref, outlet_name, scheme, requested_amt, approved_amt, stage FROM group_loans LIMIT 15;"
+                grain = "group_loan_record"
+        elif "individual" in q_lower:
+            direct_sql = "SELECT loan_product, COUNT(*) AS total_applications FROM individual_loans GROUP BY loan_product ORDER BY total_applications DESC;"
+            grain = "loan_product_aggregate"
+        else:
+            direct_sql = "SELECT * FROM outlets LIMIT 10;"
+            grain = "table_records"
+
+        return LogicPlan(
+            query=question,
+            target_dialect=dialect,
+            strategy="Adaptive Direct: Single SELECT query without CTE overhead.",
+            cte_steps=[],
+            final_select=direct_sql,
+            expected_output_grain=grain,
+            validation_notes="Adaptive planner bypassed CTE overhead for simple query.",
+            planner_backend="adaptive_direct",
+        )
+
+    def _create_schema_linked_cte_plan(
+        self,
+        question: str,
+        dialect: str,
+        schema_context: Any,
+    ) -> LogicPlan:
+        """Constructs a modular schema-linked CTE plan when multi-step decomposition is needed."""
+        q_lower = question.lower()
+        ctx_tables = list(getattr(schema_context, "selected_table_names", None) or [])
+        if isinstance(schema_context, dict):
+            ctx_tables = list(schema_context.get("selected_table_names", []))
+
+        primary_table = ctx_tables[0] if ctx_tables else "outlets"
+        candidate_sections = getattr(schema_context, "candidate_tables", None) or []
+        resolved_lits = getattr(schema_context, "resolved_literals", None) or []
+        join_rels = list(getattr(schema_context, "join_relationships", None) or [])
+        nested_hints = list(getattr(schema_context, "nested_field_hints", None) or [])
+
+        selectable_cols: List[str] = []
+        required_cols: List[str] = []
+        if candidate_sections:
+            primary_sec = candidate_sections[0]
+            for col in getattr(primary_sec, "selected_columns", []):
+                cpath = getattr(col, "path", "")
+                cname = getattr(col, "column_name", cpath)
+                if cpath and f"{primary_table}.{cpath}" not in required_cols:
+                    required_cols.append(f"{primary_table}.{cpath}")
+                if cname and cname not in selectable_cols:
+                    selectable_cols.append(cname)
+        else:
+            col_paths = list(getattr(schema_context, "selected_column_paths", None) or [])
+            if isinstance(schema_context, dict):
+                col_paths = list(schema_context.get("selected_column_paths", []))
+            required_cols = col_paths[:10]
+            for cp in col_paths:
+                parts = cp.split(".")
+                if len(parts) >= 2 and parts[0] == primary_table and parts[1] not in selectable_cols:
+                    selectable_cols.append(parts[1])
+
+        if not selectable_cols:
+            selectable_cols = ["*"]
+        else:
+            selectable_cols = selectable_cols[:8]
+
+        filter_preds: List[str] = []
+        for lit in resolved_lits:
+            ltbl = getattr(lit, "table_name", None) or (lit.get("table_name") if isinstance(lit, dict) else None)
+            lpred = getattr(lit, "sql_predicate", None) or (lit.get("sql_predicate") if isinstance(lit, dict) else None)
+            if ltbl == primary_table and lpred and lpred not in filter_preds:
+                filter_preds.append(lpred)
+
+        cols_sql = ", ".join(selectable_cols)
+        where_sql = f"\nWHERE {' AND '.join(filter_preds)}" if filter_preds else ""
+        is_count_intent = any(tok in q_lower for tok in ("how many", "count ", "total number", "number of"))
+
+        step1 = CTEPlanStep(
+            step_name="schema_filtered_base",
+            purpose=f"Extract linked columns from candidate table '{primary_table}' with grounded filters",
+            input_tables=[primary_table],
+            required_columns=required_cols or selectable_cols,
+            filters=filter_preds,
+            grouping_dimensions=[],
+            aggregation_logic="COUNT(*)" if is_count_intent else "None",
+            mathematical_calculations="None",
+            dependencies=[],
+            expected_output_grain="single_row_aggregate" if is_count_intent else f"{primary_table}_record",
+            columns_produced=["total_count"] if is_count_intent else selectable_cols,
+            sql_fragment=f"SELECT {cols_sql}\nFROM {primary_table}{where_sql}",
+        )
+
+        notes_parts: List[str] = [f"Schema-linked tables: {', '.join(ctx_tables)}."]
+        if join_rels:
+            notes_parts.append(f"Join paths: {'; '.join(join_rels[:3])}.")
+        if nested_hints:
+            notes_parts.append(f"Nested field access required ({len(nested_hints)} field(s)).")
+
+        final_sel = (
+            "SELECT COUNT(*) AS total_count FROM schema_filtered_base"
+            if is_count_intent
+            else "SELECT * FROM schema_filtered_base LIMIT 25"
+        )
+        plan = LogicPlan(
+            query=question,
+            target_dialect=dialect,
+            strategy=(
+                f"Adaptive CTE: Schema-linked modular CTE plan grounded in candidate table(s) {', '.join(ctx_tables)} "
+                f"with {len(required_cols)} retrieved field(s)."
+            ),
+            cte_steps=[step1],
+            final_select=final_sel,
+            expected_output_grain=step1.expected_output_grain,
+            dialect_functions_used=["NESTED_ACCESS"] if nested_hints else [],
+            validation_notes=" ".join(notes_parts),
+            planner_backend="schema_linked",
+        )
+        self.validator.validate_plan(plan)
+        return plan
+
     def plan_question(
         self,
         question: str,
         target_dialect: Optional[str] = None,
         schema_context: Optional[Any] = None,
     ) -> LogicPlan:
-        """Main routing method to generate an analytical CTE LogicPlan for a question."""
+        """Main routing method to generate an Adaptive CTE LogicPlan or direct query plan for a question."""
         q_lower = question.lower()
         dialect = normalize_dialect(target_dialect or self.target_dialect)
 
-        if "retention" in q_lower or ("signup" in q_lower and "return" in q_lower) or ("january" in q_lower and "february" in q_lower):
-            return self.create_cohort_retention_plan(question, target_dialect=dialect)
+        # 1. Complex analytical queries requiring multi-step CTE decomposition
+        if self.needs_cte_decomposition(question, schema_context=schema_context):
+            if "retention" in q_lower or ("signup" in q_lower and "return" in q_lower) or ("january" in q_lower and "february" in q_lower):
+                return self.create_cohort_retention_plan(question, target_dialect=dialect)
 
+            if "payout" in q_lower and ("both" in q_lower or ("group" in q_lower and "individual" in q_lower)):
+                return self.create_monthly_payouts_plan(question, target_dialect=dialect)
+
+            if "staff" in q_lower and ("attendance" in q_lower or "present" in q_lower or "rate" in q_lower or "%" in q_lower):
+                return self.create_staff_attendance_plan(question, target_dialect=dialect)
+
+            if schema_context is not None:
+                return self._create_schema_linked_cte_plan(question, dialect, schema_context)
+
+        # 2. Date window boundary query (TC-09)
         if ("signup" in q_lower or "user" in q_lower) and "january" in q_lower:
             step1 = CTEPlanStep(
                 step_name="jan_signups",
@@ -691,133 +963,8 @@ class CTEPlanner:
             self.validator.validate_plan(plan)
             return plan
 
-        if "payout" in q_lower and ("both" in q_lower or ("group" in q_lower and "individual" in q_lower)):
-            return self.create_monthly_payouts_plan(question, target_dialect=dialect)
-
-        if "staff" in q_lower and ("attendance" in q_lower or "present" in q_lower or "rate" in q_lower or "%" in q_lower):
-            return self.create_staff_attendance_plan(question, target_dialect=dialect)
-
-        # Schema-linked CTE planning using Two-Stage SchemaContext (Problem 2 integration)
-        if schema_context is not None:
-            ctx_tables = list(getattr(schema_context, "selected_table_names", None) or [])
-            if isinstance(schema_context, dict):
-                ctx_tables = list(schema_context.get("selected_table_names", []))
-
-            if ctx_tables:
-                primary_table = ctx_tables[0]
-                candidate_sections = getattr(schema_context, "candidate_tables", None) or []
-                resolved_lits = getattr(schema_context, "resolved_literals", None) or []
-                join_rels = list(getattr(schema_context, "join_relationships", None) or [])
-                nested_hints = list(getattr(schema_context, "nested_field_hints", None) or [])
-
-                # Collect directly selectable column names for primary_table
-                selectable_cols: List[str] = []
-                required_cols: List[str] = []
-                if candidate_sections:
-                    primary_sec = candidate_sections[0]
-                    for col in getattr(primary_sec, "selected_columns", []):
-                        cpath = getattr(col, "path", "")
-                        cname = getattr(col, "column_name", cpath)
-                        if cpath and f"{primary_table}.{cpath}" not in required_cols:
-                            required_cols.append(f"{primary_table}.{cpath}")
-                        if cname and cname not in selectable_cols:
-                            selectable_cols.append(cname)
-                else:
-                    col_paths = list(getattr(schema_context, "selected_column_paths", None) or [])
-                    if isinstance(schema_context, dict):
-                        col_paths = list(schema_context.get("selected_column_paths", []))
-                    required_cols = col_paths[:10]
-                    for cp in col_paths:
-                        parts = cp.split(".")
-                        if len(parts) >= 2 and parts[0] == primary_table and parts[1] not in selectable_cols:
-                            selectable_cols.append(parts[1])
-
-                if not selectable_cols:
-                    selectable_cols = ["*"]
-                else:
-                    selectable_cols = selectable_cols[:8]
-
-                # Collect grounded literal filters scoped to primary_table
-                filter_preds: List[str] = []
-                for lit in resolved_lits:
-                    ltbl = getattr(lit, "table_name", None) or (lit.get("table_name") if isinstance(lit, dict) else None)
-                    lpred = getattr(lit, "sql_predicate", None) or (lit.get("sql_predicate") if isinstance(lit, dict) else None)
-                    if ltbl == primary_table and lpred and lpred not in filter_preds:
-                        filter_preds.append(lpred)
-
-                cols_sql = ", ".join(selectable_cols)
-                where_sql = f"\nWHERE {' AND '.join(filter_preds)}" if filter_preds else ""
-                is_count_intent = any(tok in q_lower for tok in ("how many", "count ", "total number", "number of"))
-                step1 = CTEPlanStep(
-                    step_name="schema_filtered_base",
-                    purpose=f"Extract linked columns from candidate table '{primary_table}' with grounded filters",
-                    input_tables=[primary_table],
-                    required_columns=required_cols or selectable_cols,
-                    filters=filter_preds,
-                    grouping_dimensions=[],
-                    aggregation_logic="COUNT(*)" if is_count_intent else "None",
-                    mathematical_calculations="None",
-                    dependencies=[],
-                    expected_output_grain="single_row_aggregate" if is_count_intent else f"{primary_table}_record",
-                    columns_produced=["total_count"] if is_count_intent else selectable_cols,
-                    sql_fragment=f"SELECT {cols_sql}\nFROM {primary_table}{where_sql}",
-                )
-
-                notes_parts: List[str] = [f"Schema-linked tables: {', '.join(ctx_tables)}."]
-                if join_rels:
-                    notes_parts.append(f"Join paths: {'; '.join(join_rels[:3])}.")
-                if nested_hints:
-                    notes_parts.append(f"Nested field access required ({len(nested_hints)} field(s)).")
-
-                final_sel = (
-                    "SELECT COUNT(*) AS total_count FROM schema_filtered_base"
-                    if is_count_intent
-                    else "SELECT * FROM schema_filtered_base LIMIT 25"
-                )
-                plan = LogicPlan(
-                    query=question,
-                    target_dialect=dialect,
-                    strategy=(
-                        f"Schema-linked CTE plan grounded in candidate table(s) {', '.join(ctx_tables)} "
-                        f"with {len(required_cols)} retrieved field(s)."
-                    ),
-                    cte_steps=[step1],
-                    final_select=final_sel,
-                    expected_output_grain=step1.expected_output_grain,
-                    dialect_functions_used=["NESTED_ACCESS"] if nested_hints else [],
-                    validation_notes=" ".join(notes_parts),
-                    planner_backend="schema_linked",
-                )
-                self.validator.validate_plan(plan)
-                return plan
-
-        # Fallback to single-CTE query
-        step1 = CTEPlanStep(
-            step_name="base_data",
-            purpose="Extract candidate records matching query intent",
-            input_tables=["outlets"],
-            required_columns=["*"],
-            filters=[],
-            grouping_dimensions=[],
-            aggregation_logic="None",
-            mathematical_calculations="None",
-            dependencies=[],
-            expected_output_grain="table_records",
-            columns_produced=["*"],
-            sql_fragment="SELECT * FROM outlets LIMIT 10",
-        )
-
-        plan = LogicPlan(
-            query=question,
-            target_dialect=dialect,
-            strategy="Extract base records within a modular CTE.",
-            cte_steps=[step1],
-            final_select="SELECT * FROM base_data",
-            expected_output_grain="table_records",
-            planner_backend="fallback",
-        )
-        self.validator.validate_plan(plan)
-        return plan
+        # 3. Adaptive Direct execution: for simple queries, bypass CTE overhead completely
+        return self.create_direct_query_plan(question, target_dialect=dialect, schema_context=schema_context)
 
     def plan_and_compile(
         self,

@@ -290,27 +290,31 @@ class SQLGenerator:
         doc_context: str = "",
     ) -> str:
         """Constructs a comprehensive, grounded prompt for the Hugging Face model."""
-        plan_steps_summary = []
-        for s in plan.cte_steps:
-            plan_steps_summary.append(
-                f"- CTE `{s.step_name}`: {s.purpose}\n"
-                f"  * Inputs: {s.input_tables}\n"
-                f"  * Expected Output Grain: {s.expected_output_grain}\n"
-                f"  * Aggregation / Math: {s.aggregation_logic} | {s.mathematical_calculations}"
-            )
-        plan_str = "\n".join(plan_steps_summary)
+        if plan.cte_steps:
+            plan_steps_summary = []
+            for s in plan.cte_steps:
+                plan_steps_summary.append(
+                    f"- CTE `{s.step_name}`: {s.purpose}\n"
+                    f"  * Inputs: {s.input_tables}\n"
+                    f"  * Expected Output Grain: {s.expected_output_grain}\n"
+                    f"  * Aggregation / Math: {s.aggregation_logic} | {s.mathematical_calculations}"
+                )
+            plan_str = "CTE Sequence:\n" + "\n".join(plan_steps_summary)
+            cte_rule = "1. Deconstruct the query strictly using the CTEs defined in the plan."
+        else:
+            plan_str = "ADAPTIVE EXECUTION: Direct single-stage SELECT query. Do NOT wrap this simple query in unnecessary CTEs."
+            cte_rule = "1. Generate a clean, direct single SELECT statement without CTE overhead."
 
         return f"""You are a principal SQL engineer solving Spider 2.0 analytical queries.
-Generate a dialect-correct SQL query implementing the analytical CTE plan below.
+Generate a dialect-correct SQL query implementing the analytical plan below.
 
 TARGET SQL DIALECT: {target_dialect.upper()}
 
 USER QUESTION:
 "{question}"
 
-ANALYTICAL CTE PLAN (Do not deviate from this strategy):
+ANALYTICAL EXECUTION PLAN:
 Strategy: {plan.strategy}
-CTE Sequence:
 {plan_str}
 Final Select Requirement: {plan.final_select}
 
@@ -324,7 +328,7 @@ DATABASE SCHEMA CONTEXT:
 {schema_context}
 
 MANDATORY RULES:
-1. Deconstruct the query strictly using the CTEs defined in the plan.
+{cte_rule}
 2. For all ratios or percentages, ALWAYS guard the denominator using NULLIF(denominator, 0).
 3. Do not count events when distinct entity counting is required.
 4. Adhere strictly to {target_dialect.upper()} function syntax and argument ordering.
@@ -558,11 +562,17 @@ MANDATORY RULES:
 
         # Step 6: Verified CTE Plan Compiler fallback (guarantees mathematically correct execution)
         compiled_sql = CTEPlanCompiler.compile(plan, target_dialect=dialect)
-        explanation = (
-            f"IMPROVED CTE PLANNER: Decomposed into {len(plan.cte_steps)} explicit CTEs. "
-            f"Grain: {plan.expected_output_grain}. Safe math: NULLIF division guard. "
-            f"Topological DAG dependencies verified."
-        )
+        if not plan.cte_steps:
+            explanation = (
+                f"ADAPTIVE DIRECT QUERY: Generated optimized single-stage SQL without CTE overhead. "
+                f"Grain: {plan.expected_output_grain}."
+            )
+        else:
+            explanation = (
+                f"IMPROVED CTE PLANNER (ADAPTIVE): Decomposed into {len(plan.cte_steps)} explicit CTEs for multi-grain analytical safety. "
+                f"Grain: {plan.expected_output_grain}. Safe math: NULLIF division guard. "
+                f"Topological DAG dependencies verified."
+            )
         return GenerationResult(
             strategy="improved",
             question=question,

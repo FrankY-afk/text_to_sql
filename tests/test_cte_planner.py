@@ -234,3 +234,48 @@ def test_staff_attendance_plan(planner):
     assert report.is_valid is True
     assert "NULLIF(d.total_staff_count, 0)" in sql
 
+
+
+def test_adaptive_cte_complexity_detection(planner):
+    """Verifies that adaptive CTE analyzer correctly classifies complex vs simple queries."""
+    # Complex queries strictly needing CTE decomposition
+    assert planner.needs_cte_decomposition("What percentage of users who signed up in January returned in February?") is True
+    assert planner.needs_cte_decomposition("Show monthly payouts across both group loans and individual loans") is True
+    assert planner.needs_cte_decomposition("What percentage of our staff members were marked present in June 2026?") is True
+    assert planner.needs_cte_decomposition("Calculate the 90+ DPD NPA ratio for retail loans") is True
+    assert planner.needs_cte_decomposition("Show the latest rank of loan applications per customer") is True
+
+    # Simple queries that bypass CTE overhead (Adaptive Direct)
+    assert planner.needs_cte_decomposition("Show outlets in Maharashtra") is False
+    assert planner.needs_cte_decomposition("Count staff members by position") is False
+    assert planner.needs_cte_decomposition("How many outlets are in tier 1?") is False
+    assert planner.needs_cte_decomposition("List active group loans") is False
+
+
+def test_adaptive_direct_plan_bypasses_cte_overhead(planner):
+    """Verifies that simple queries generate a direct SELECT query with 0 CTEs."""
+    plan = planner.plan_question("Show outlets in Maharashtra", target_dialect="postgres")
+    assert len(plan.cte_steps) == 0
+    assert plan.planner_backend == "adaptive_direct"
+    assert "Adaptive Direct" in plan.strategy
+
+    # Compiles without WITH clause
+    sql = planner.plan_and_compile("Show outlets in Maharashtra", target_dialect="postgres")
+    assert "WITH" not in sql
+    assert "SELECT" in sql
+
+    # Validates as safe read-only SQL
+    report = validate_readonly_sql(sql, dialect="postgres")
+    assert report.is_valid is True
+    assert report.is_readonly is True
+
+
+def test_adaptive_cte_complex_query_uses_full_dag(planner):
+    """Verifies that complex analytical queries use full modular CTE DAGs."""
+    plan = planner.plan_question("What percentage of users who signed up in January returned in February?", target_dialect="postgres")
+    assert len(plan.cte_steps) == 4
+    assert plan.cte_steps[0].step_name == "jan_signup_cohort"
+
+    sql = planner.plan_and_compile("What percentage of users who signed up in January returned in February?", target_dialect="postgres")
+    assert "WITH" in sql
+    assert "jan_signup_cohort AS (" in sql

@@ -1,8 +1,7 @@
-"""Main entrypoint for Text-to-SQL Problem 1: Erroneous Data Analysis.
+"""Main entrypoint for Text-to-SQL (Spider 2.0 + MCP).
 
-Demonstrates how SQL queries can execute with zero errors yet produce logically
-erroneous business metrics, and shows how Model Context Protocol (MCP) and Semantic
-AST Validation detect and fix these failure modes.
+Integrates Model Context Protocol (MCP), Adaptive CTE Planning,
+Semantic Validation, and Execution-Grounded Self-Repair.
 """
 
 from __future__ import annotations
@@ -22,17 +21,12 @@ from src.cli import launch_cli
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Text-to-SQL Problem 1: Erroneous Data Analysis (MCP & PostgreSQL)"
+        description="Text-to-SQL Assistant: Spider 2.0 + MCP + Adaptive CTE"
     )
     parser.add_argument(
         "--demo",
         action="store_true",
-        help="Run the automated one-shot baseline vs improved demo",
-    )
-    parser.add_argument(
-        "--inspect-pg",
-        action="store_true",
-        help="Run full live PostgreSQL database schema inspection",
+        help="Run the automated demonstration runner",
     )
     parser.add_argument(
         "--interactive",
@@ -42,10 +36,7 @@ def main():
     )
     args = parser.parse_args()
 
-    if args.inspect_pg:
-        from scripts.inspect_database import inspect_postgres
-        inspect_postgres()
-    elif args.demo:
+    if args.demo:
         run_demonstration()
     else:
         # Default behavior: Launch interactive terminal console
