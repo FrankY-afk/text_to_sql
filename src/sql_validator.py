@@ -1,7 +1,7 @@
 """SQL syntax, AST security, and read-only policy validator using SQLGlot.
 
 Ensures generated SQL is syntactically valid, single-statement, strictly read-only,
-and free from destructive DDL/DML, file access, or administrative commands.
+and free from destructive DDL/DML, file access, administrative commands, or dialect-forbidden functions.
 """
 
 from __future__ import annotations
@@ -11,6 +11,9 @@ from typing import Any, Dict, List, Optional, Set
 from pydantic import BaseModel, Field
 import sqlglot
 from sqlglot import exp
+
+from src.cte_planner import normalize_dialect
+from src.dialect_rag import DialectFunctionRAG
 
 logger = logging.getLogger(__name__)
 
@@ -52,6 +55,9 @@ class SQLValidationReport(BaseModel):
     tables_referenced: List[str] = Field(default_factory=list, description="List of table names referenced")
     has_aggregation: bool = Field(default=False, description="True if query uses aggregate functions")
     has_distinct: bool = Field(default=False, description="True if query contains DISTINCT clauses")
+    has_ctes: bool = Field(default=False, description="True if query defines Common Table Expressions (WITH clause)")
+    cte_names: List[str] = Field(default_factory=list, description="List of CTE names defined in query")
+    dialect_violations: List[str] = Field(default_factory=list, description="Dialect-specific syntax or function violations")
 
 
 def validate_readonly_sql(sql: str, dialect: str = "postgres") -> SQLValidationReport:
@@ -68,9 +74,11 @@ def validate_readonly_sql(sql: str, dialect: str = "postgres") -> SQLValidationR
     if not clean_sql:
         return SQLValidationReport(is_valid=False, error="Query cannot be empty.")
 
+    norm_dialect = normalize_dialect(dialect)
+
     # 1. Parse into AST statements
     try:
-        statements = sqlglot.parse(clean_sql, read=dialect)
+        statements = sqlglot.parse(clean_sql, read=norm_dialect)
     except Exception as exc:
         return SQLValidationReport(is_valid=False, error=f"SQL syntax error: {exc}")
 
@@ -110,7 +118,7 @@ def validate_readonly_sql(sql: str, dialect: str = "postgres") -> SQLValidationR
                 error=f"Forbidden operation '{forbidden_type.__name__}' detected inside query.",
             )
 
-    # 5. Check for dangerous function calls
+    # 5. Check for dangerous system function calls
     for func in ast.find_all(exp.Anonymous, exp.Func):
         func_name = func.name.lower() if hasattr(func, "name") and func.name else ""
         if func_name in FORBIDDEN_FUNCTIONS:
@@ -121,11 +129,49 @@ def validate_readonly_sql(sql: str, dialect: str = "postgres") -> SQLValidationR
                 error=f"Execution of forbidden system function '{func_name}' is blocked.",
             )
 
-    # 6. Extract referenced tables
-    tables = [t.name for t in ast.find_all(exp.Table) if t.name]
-    unique_tables = sorted(list(set(tables)))
+    # 6. Check Dialect Function Compatibility
+    rag = DialectFunctionRAG()
+    dialect_violations = rag.validate_sql_dialect_compatibility(clean_sql, target_dialect=norm_dialect)
+    if dialect_violations:
+        return SQLValidationReport(
+            is_valid=False,
+            is_readonly=True,
+            statement_type=statement_type,
+            error="; ".join(dialect_violations),
+            dialect_violations=dialect_violations,
+        )
 
-    # 7. Check for aggregation and distinct
+    # 7. Extract CTE information and verify CTE ordering
+    cte_nodes = list(ast.find_all(exp.CTE))
+    cte_names: List[str] = []
+    if cte_nodes:
+        defined_so_far: Set[str] = set()
+        for cte in cte_nodes:
+            c_alias = cte.alias_or_name.lower() if cte.alias_or_name else ""
+            if c_alias:
+                cte_names.append(c_alias)
+                # Check for forward-reference within CTE body
+                body_tables = {t.name.lower() for t in cte.find_all(exp.Table) if t.name}
+                # If body_tables references another CTE not yet defined
+                future_ctes = {other.alias_or_name.lower() for other in cte_nodes if other != cte and other.alias_or_name.lower() not in defined_so_far}
+                leaked_forward = body_tables.intersection(future_ctes)
+                if leaked_forward:
+                    return SQLValidationReport(
+                        is_valid=False,
+                        is_readonly=True,
+                        statement_type=statement_type,
+                        cte_names=cte_names,
+                        has_ctes=True,
+                        error=f"CTE dependency forward-reference: CTE '{c_alias}' references '{list(leaked_forward)[0]}', which is defined later.",
+                    )
+                defined_so_far.add(c_alias)
+
+    # 8. Extract referenced base tables
+    all_tables = [t.name for t in ast.find_all(exp.Table) if t.name]
+    cte_names_set = set(cte_names)
+    base_tables = sorted(list({t for t in all_tables if t.lower() not in cte_names_set}))
+
+    # 9. Check for aggregation and distinct
     has_agg = bool(list(ast.find_all(exp.AggFunc)))
     has_dist = bool(ast.find(exp.Distinct)) or any(
         getattr(f, "distinct", False) for f in ast.find_all(exp.AggFunc)
@@ -135,7 +181,10 @@ def validate_readonly_sql(sql: str, dialect: str = "postgres") -> SQLValidationR
         is_valid=True,
         is_readonly=True,
         statement_type=statement_type,
-        tables_referenced=unique_tables,
+        tables_referenced=base_tables,
         has_aggregation=has_agg,
         has_distinct=has_dist,
+        has_ctes=bool(cte_names),
+        cte_names=cte_names,
+        dialect_violations=dialect_violations,
     )

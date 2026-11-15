@@ -6,6 +6,7 @@ Verifies:
 - Correct numerator and denominator cohort isolation.
 - Repeat activity and duplicate handling.
 - Detection of join filter leak.
+- Detection of Cartesian join fan-out without pre-aggregation CTEs.
 - Comparison of Baseline failure vs Improved pipeline accuracy.
 """
 
@@ -106,3 +107,42 @@ def test_join_filter_leak_detection():
     assert report.is_semantically_sound is False
     assert report.has_join_filter_leak is True
     assert any("Filter Misplacement Trap" in err for err in report.errors)
+
+
+def test_cartesian_fan_out_detection():
+    """Verifies that unaggregated multi-table joins are flagged as Cartesian fan-out risks."""
+    contract = AnalyticalContract(
+        metric_name="Monthly Payouts Across Both Loan Types",
+        target_entity="month",
+        requires_distinct_entity_count=False,
+        is_percentage=False,
+        requires_preaggregation_ctes=True,
+    )
+    # Naive query joins two unaggregated tables directly without CTEs
+    naive_join_sql = """
+    SELECT TO_CHAR(g.paid_at, 'YYYY-MM') AS m, SUM(g.paid_amt), SUM(i.payout_amt)
+    FROM group_loans g
+    JOIN individual_loans i ON TO_CHAR(g.paid_at, 'YYYY-MM') = TO_CHAR(i.payout_at, 'YYYY-MM')
+    GROUP BY TO_CHAR(g.paid_at, 'YYYY-MM');
+    """
+    report = validate_semantic_analysis(naive_join_sql, contract)
+    assert report.is_semantically_sound is False
+    assert report.has_join_multiplication_risk is True
+    assert any("Cartesian Fan-Out" in err for err in report.errors)
+
+
+def test_date_boundary_warning_on_between():
+    """Verifies that BETWEEN on date/timestamp columns triggers an ambiguous boundary warning."""
+    contract = AnalyticalContract(
+        metric_name="Cohort Size",
+        target_entity="user_id",
+        requires_distinct_entity_count=True,
+    )
+    sql_with_between = """
+    SELECT COUNT(DISTINCT user_id)
+    FROM users
+    WHERE signup_date BETWEEN '2024-01-01' AND '2024-01-31';
+    """
+    report = validate_semantic_analysis(sql_with_between, contract)
+    assert report.has_date_boundary_issue is True
+    assert any("Ambiguous Date Boundary" in w for w in report.warnings)
