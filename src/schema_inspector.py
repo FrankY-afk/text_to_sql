@@ -73,6 +73,11 @@ class TableMetadata(BaseModel):
     foreign_keys: List[ForeignKeyMetadata] = Field(default_factory=list)
 
 
+_GLOBAL_SCHEMA_TABLES_CACHE: Dict[Tuple[str, Optional[str], bool], List[str]] = {}
+_GLOBAL_SCHEMA_COLUMNS_CACHE: Dict[Tuple[str, str, Optional[str]], List[Dict[str, Any]]] = {}
+_GLOBAL_SCHEMA_FKS_CACHE: Dict[Tuple[str, str, Optional[str]], List[ForeignKeyMetadata]] = {}
+
+
 class SchemaInspector:
     """Introspects relational database schemas and formats schema context for Text-to-SQL."""
 
@@ -123,8 +128,12 @@ class SchemaInspector:
     ) -> List[str]:
         """Returns sorted list of permitted base table names."""
         cache_key = (schema, include_schema_prefix)
+        global_key = (self.target, schema, include_schema_prefix)
         if cache_key in self._table_names_cache:
             return list(self._table_names_cache[cache_key])
+        if global_key in _GLOBAL_SCHEMA_TABLES_CACHE:
+            self._table_names_cache[cache_key] = _GLOBAL_SCHEMA_TABLES_CACHE[global_key]
+            return list(_GLOBAL_SCHEMA_TABLES_CACHE[global_key])
         if self.target in ("local", "sqlite"):
             conn = get_local_db_connection(self.settings)
             cur = conn.cursor()
@@ -161,6 +170,7 @@ class SchemaInspector:
             tables = [row[0] for row in cur.fetchall()]
             res = [f"{target_schema}.{t}" for t in tables] if include_schema_prefix else tables
             self._table_names_cache[cache_key] = res
+            _GLOBAL_SCHEMA_TABLES_CACHE[global_key] = res
             return list(res)
 
     def get_foreign_keys(
@@ -171,6 +181,14 @@ class SchemaInspector:
         """Extracts foreign key constraints originating from the specified table."""
         default_schema = "main" if self.target in ("local", "sqlite", "duckdb") else self.settings.postgres_schema
         schema_name, clean_table = split_qualified_table_name(table_name, default_schema=schema or default_schema)
+
+        cache_key = (clean_table, schema_name)
+        global_key = (self.target, clean_table, schema_name)
+        if cache_key in self._foreign_keys_cache:
+            return list(self._foreign_keys_cache[cache_key])
+        if global_key in _GLOBAL_SCHEMA_FKS_CACHE:
+            self._foreign_keys_cache[cache_key] = _GLOBAL_SCHEMA_FKS_CACHE[global_key]
+            return list(_GLOBAL_SCHEMA_FKS_CACHE[global_key])
 
         permitted = self.get_table_names(schema=schema_name)
         if clean_table not in permitted:
@@ -194,6 +212,8 @@ class SchemaInspector:
                     )
                 )
             conn.close()
+            self._foreign_keys_cache[cache_key] = fks
+            _GLOBAL_SCHEMA_FKS_CACHE[global_key] = fks
             return fks
 
         if self.target == "duckdb":
@@ -235,6 +255,8 @@ class SchemaInspector:
                         constraint_name=cname,
                     )
                 )
+            self._foreign_keys_cache[cache_key] = fks
+            _GLOBAL_SCHEMA_FKS_CACHE[global_key] = fks
             return fks
 
     def get_table_columns(
@@ -248,6 +270,10 @@ class SchemaInspector:
             return list(self._columns_cache[cache_key])
         default_schema = "main" if self.target in ("local", "sqlite", "duckdb") else self.settings.postgres_schema
         schema_name, clean_table = split_qualified_table_name(table_name, default_schema=schema or default_schema)
+        global_key = (self.target, clean_table, schema_name)
+        if global_key in _GLOBAL_SCHEMA_COLUMNS_CACHE:
+            self._columns_cache[cache_key] = _GLOBAL_SCHEMA_COLUMNS_CACHE[global_key]
+            return list(_GLOBAL_SCHEMA_COLUMNS_CACHE[global_key])
 
         permitted = self.get_table_names(schema=schema_name)
         if clean_table not in permitted:
@@ -346,6 +372,8 @@ class SchemaInspector:
                     "foreign_key_target": fk_map.get(col_name),
                     "comment": col_comment,
                 })
+            self._columns_cache[cache_key] = columns
+            _GLOBAL_SCHEMA_COLUMNS_CACHE[global_key] = columns
             return columns
 
     def get_schema_card(self, table_name: str, schema: Optional[str] = None) -> str:

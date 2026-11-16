@@ -30,18 +30,41 @@ class HuggingFaceInferenceError(Exception):
 class HuggingFaceClient:
     """Client for generating SQL queries using Hugging Face models."""
 
+    _circuit_broken: bool = False
+    _circuit_broken_reason: str = ""
+
     def __init__(self, settings: Optional[Settings] = None):
         self.settings = settings or get_settings()
         self.model_id = self.settings.llm_model
         self.token = self.settings.get_hf_token()
         self.endpoint_url = self.settings.hf_endpoint_url
-        self.timeout = self.settings.hf_timeout_seconds
+        self.timeout = min(self.settings.hf_timeout_seconds, 10)
         self.temperature = self.settings.hf_temperature
 
         self._client: Optional[InferenceClient] = None
 
+    @classmethod
+    def is_circuit_broken(cls) -> bool:
+        """Returns True if the circuit breaker has been tripped by billing/auth errors."""
+        return cls._circuit_broken
+
+    @classmethod
+    def reset_circuit_breaker(cls) -> None:
+        """Resets the circuit breaker to allow new API connection attempts."""
+        cls._circuit_broken = False
+        cls._circuit_broken_reason = ""
+
+    @classmethod
+    def trip_circuit_breaker(cls, reason: str) -> None:
+        """Trips the circuit breaker to fail fast and protect against multi-second hangs."""
+        cls._circuit_broken = True
+        cls._circuit_broken_reason = reason
+        logger.warning("Hugging Face API circuit breaker tripped: %s", reason)
+
     def is_configured(self) -> bool:
-        """Returns True if a valid Hugging Face API key/token or endpoint URL is configured."""
+        """Returns True if a valid Hugging Face API key/token or endpoint URL is configured and circuit is intact."""
+        if self._circuit_broken:
+            return False
         return bool(self.token or self.endpoint_url)
 
     def get_client(self) -> InferenceClient:
@@ -73,9 +96,16 @@ class HuggingFaceClient:
         Raises:
             HuggingFaceInferenceError: If inference fails or no API key is configured.
         """
+        if self._circuit_broken:
+            raise HuggingFaceInferenceError(
+                f"Hugging Face API circuit breaker active: {self._circuit_broken_reason}. "
+                "Engaging deterministic CTE planner and execution-grounded fallback."
+            )
+
         if not self.is_configured():
             raise HuggingFaceInferenceError(
-                "Hugging Face API key is not configured. Set HF_API_KEY, HF_TOKEN, or TEXT2SQL_HF_API_TOKEN in your environment or .env file."
+                "Hugging Face API key is not configured or circuit breaker active. "
+                "Set HF_API_KEY, HF_TOKEN, or TEXT2SQL_HF_API_TOKEN in your environment or .env file."
             )
 
         client = self.get_client()
@@ -105,9 +135,19 @@ class HuggingFaceClient:
                 last_error = exc
                 err_str = str(exc).lower()
                 logger.warning("Hugging Face inference attempt %d failed: %s", attempt + 1, exc)
+
+                # Permanent billing/auth/permissions errors -> trip circuit breaker immediately
+                if any(tok in err_str for tok in (
+                    "402", "payment required", "pre-paid credits",
+                    "401", "unauthorized", "invalid token",
+                    "403", "forbidden",
+                )):
+                    HuggingFaceClient.trip_circuit_breaker(f"Permanent billing/auth error: {exc}")
+                    break
+
                 # If model is loading (503), wait and retry
                 if "loading" in err_str or "503" in err_str:
-                    time.sleep(4 * (attempt + 1))
+                    time.sleep(2 * (attempt + 1))
                     continue
                 break
 

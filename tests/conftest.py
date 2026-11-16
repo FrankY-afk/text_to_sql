@@ -34,3 +34,15 @@ postgres_required = pytest.mark.skipif(
     reason="Live PostgreSQL is not reachable or credentials are not configured in .env",
 )
 
+
+@pytest.fixture(autouse=True)
+def reset_hf_state_and_settings():
+    """Ensures each test starts with a clean circuit breaker and fresh settings."""
+    from src.config import reset_settings
+    from src.hf_client import HuggingFaceClient
+
+    HuggingFaceClient.reset_circuit_breaker()
+    yield
+    HuggingFaceClient.reset_circuit_breaker()
+    reset_settings()
+

@@ -103,27 +103,33 @@ def test_hf_api_key_resolution_across_env_vars(monkeypatch):
     """Verifies that Hugging Face API key is resolved from HF_API_KEY, HF_TOKEN, or TEXT2SQL_HF_API_TOKEN."""
     from src.config import Settings, reset_settings
 
+    # Clear any ambient tokens from env or dotenv
+    monkeypatch.delenv("HF_API_KEY", raising=False)
+    monkeypatch.delenv("HF_TOKEN", raising=False)
+    monkeypatch.delenv("HUGGINGFACE_API_KEY", raising=False)
+    monkeypatch.delenv("TEXT2SQL_HF_API_TOKEN", raising=False)
+
     # 1. Test HF_API_KEY env var
     monkeypatch.setenv("HF_API_KEY", "hf_test_api_key_123")
-    settings = Settings()
+    settings = Settings(_env_file=None)
     assert settings.get_hf_token() == "hf_test_api_key_123"
 
     # 2. Test HF_TOKEN env var
     monkeypatch.delenv("HF_API_KEY", raising=False)
     monkeypatch.setenv("HF_TOKEN", "hf_token_456")
-    settings = Settings()
+    settings = Settings(_env_file=None)
     assert settings.get_hf_token() == "hf_token_456"
 
     # 3. Test HUGGINGFACE_API_KEY env var
     monkeypatch.delenv("HF_TOKEN", raising=False)
     monkeypatch.setenv("HUGGINGFACE_API_KEY", "hf_key_789")
-    settings = Settings()
+    settings = Settings(_env_file=None)
     assert settings.get_hf_token() == "hf_key_789"
 
     # 4. Test TEXT2SQL_HF_API_TOKEN env var
     monkeypatch.delenv("HUGGINGFACE_API_KEY", raising=False)
     monkeypatch.setenv("TEXT2SQL_HF_API_TOKEN", "hf_text2sql_token")
-    settings = Settings()
+    settings = Settings(_env_file=None)
     assert settings.get_hf_token() == "hf_text2sql_token"
 
     # 5. Verify HuggingFaceClient is_configured() returns True with resolved API key

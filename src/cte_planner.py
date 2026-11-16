@@ -750,7 +750,14 @@ class CTEPlanner:
                     grain = "single_row_aggregate"
                 else:
                     cols_str = ", ".join(selectable_cols[:8]) if selectable_cols else "*"
-                    direct_sql = f"SELECT {cols_str} FROM {primary_table}{where_clause} LIMIT 25;"
+                    order_by = ""
+                    if primary_table == "outlets":
+                        if not selectable_cols or len(selectable_cols) < 3:
+                            cols_str = "outlet_code, outlet_name, state_name, cluster_name, tier"
+                        order_by = " ORDER BY outlet_name"
+                    elif primary_table == "staff":
+                        order_by = " ORDER BY staff_no"
+                    direct_sql = f"SELECT {cols_str} FROM {primary_table}{where_clause}{order_by} LIMIT 15;"
                     grain = f"{primary_table}_record"
 
                 return LogicPlan(
@@ -766,11 +773,26 @@ class CTEPlanner:
 
         # Fallback simple direct queries grounded in domain schema
         if "outlet" in q_lower:
+            outlet_preds: List[str] = []
+            for r in ("central", "coastal", "deccan", "eastern", "gangetic"):
+                if r in q_lower or (r == "deccan" and ("decan" in q_lower or "deccan" in q_lower)):
+                    outlet_preds.append(f"cluster_name LIKE '{r.capitalize()}%'")
+                    break
+            for s in ("andhra pradesh", "telangana", "odisha", "uttar pradesh", "bihar", "maharashtra", "tamil nadu", "karnataka"):
+                if s in q_lower:
+                    outlet_preds.append(f"state_name = '{s.title()}'")
+                    break
+            for t_str, t_val in [("tier 1", "T1"), ("tier 2", "T2"), ("tier 3", "T3"), ("tier-1", "T1"), ("tier-2", "T2"), ("tier-3", "T3")]:
+                if t_str in q_lower:
+                    outlet_preds.append(f"tier = '{t_val}'")
+                    break
+
+            where_sql = f" WHERE {' AND '.join(outlet_preds)}" if outlet_preds else ""
             if "count" in q_lower or "how many" in q_lower:
-                direct_sql = "SELECT COUNT(*) AS total_outlets FROM outlets;"
+                direct_sql = f"SELECT COUNT(*) AS total_outlets FROM outlets{where_sql};"
                 grain = "single_row_aggregate"
             else:
-                direct_sql = "SELECT outlet_code, outlet_name, state_name, cluster_name, tier FROM outlets ORDER BY outlet_name LIMIT 15;"
+                direct_sql = f"SELECT outlet_code, outlet_name, state_name, cluster_name, tier FROM outlets{where_sql} ORDER BY outlet_name LIMIT 15;"
                 grain = "outlet_record"
         elif "staff" in q_lower:
             if "by position" in q_lower:

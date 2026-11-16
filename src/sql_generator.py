@@ -57,6 +57,9 @@ class GenerationResult(BaseModel):
     )
 
 
+_sqlgen_retriever_cache: Dict[str, EnterpriseSchemaRetriever] = {}
+
+
 class SQLGenerator:
     """Generates SQL queries informed by MCP schema inspection, two-stage schema linking, dialect RAG, and analytical CTE plans."""
 
@@ -73,7 +76,7 @@ class SQLGenerator:
         self.hf_client = hf_client or HuggingFaceClient()
         self.schema_retriever = schema_retriever
         self.embedding_backend = embedding_backend
-        self._retriever_cache: Dict[str, EnterpriseSchemaRetriever] = {}
+        self._retriever_cache = _sqlgen_retriever_cache
         self.doc_retriever = DocumentationRetriever(in_memory=True, embedding_backend=self.embedding_backend)
         self.explorer = DatabaseExplorer(executor=self.executor)
 
@@ -116,7 +119,7 @@ class SQLGenerator:
                 retriever.index_from_inspector(
                     inspector=inspector,
                     clear_existing=True,
-                    index_distinct_values=True,
+                    index_distinct_values=False,
                 )
                 self._retriever_cache[tgt_key] = retriever
 

@@ -65,3 +65,32 @@ def test_resolve_fuzzy_state_typo_and_unindexed_state(resolver):
     assert "fuzzy" in match.match_type
     assert match.table_name == "outlets"
     assert match.column_name == "state_name"
+
+
+def test_resolve_cluster_typo_and_subcluster(resolver):
+    """Verifies typo tolerance for cluster regions ('decan' -> 'Deccan%') and sub-clusters ('decan 2' -> 'Deccan-2')."""
+    # 1. Base cluster region with typo: "decan outlets" -> cluster_name LIKE 'Deccan%'
+    q1 = "list all the decan outlets"
+    matches1 = resolver.resolve_literals(q1)
+    cluster_matches1 = [m for m in matches1 if m.column_name == "cluster_name"]
+    assert len(cluster_matches1) == 1
+    assert cluster_matches1[0].database_literal == "Deccan%"
+    assert cluster_matches1[0].sql_predicate == "cluster_name LIKE 'Deccan%'"
+    assert "fuzzy" in cluster_matches1[0].match_type
+    assert cluster_matches1[0].confidence >= 0.95
+
+    # 2. Sub-cluster with typo: "decan 2" -> cluster_name = 'Deccan-2'
+    q2 = "show outlets in decan 2"
+    matches2 = resolver.resolve_literals(q2)
+    cluster_matches2 = [m for m in matches2 if m.column_name == "cluster_name"]
+    assert len(cluster_matches2) == 1
+    assert cluster_matches2[0].database_literal == "Deccan-2"
+    assert cluster_matches2[0].sql_predicate == "cluster_name = 'Deccan-2'"
+
+    # 3. Exact cluster region: "coastal outlets" -> cluster_name LIKE 'Coastal%'
+    q3 = "how many coastal outlets are there"
+    matches3 = resolver.resolve_literals(q3)
+    cluster_matches3 = [m for m in matches3 if m.column_name == "cluster_name"]
+    assert len(cluster_matches3) == 1
+    assert cluster_matches3[0].database_literal == "Coastal%"
+    assert cluster_matches3[0].sql_predicate == "cluster_name LIKE 'Coastal%'"

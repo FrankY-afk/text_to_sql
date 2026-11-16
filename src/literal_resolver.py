@@ -104,12 +104,15 @@ KNOWN_INDIAN_STATES = [
     "Telangana", "Tripura", "Uttar Pradesh", "Uttarakhand", "West Bengal", "Delhi"
 ]
 
+KNOWN_CLUSTER_REGIONS = ["Central", "Coastal", "Deccan", "Eastern", "Gangetic"]
+
 STOP_WORDS = {"in", "the", "located", "at", "for", "all", "show", "of", "and", "tier", "outlets", "outlet", "by"}
 
 # Targeted categorical columns for live inspection / standalone postgres literal grounding
 INDEXED_CATEGORICAL_COLUMNS = [
     ("outlets", "state_name"),
     ("outlets", "tier"),
+    ("outlets", "cluster_name"),
     ("staff_attendance", "attendance_code"),
     ("group_loans", "stage"),
     ("group_loans", "origin_type"),
@@ -135,6 +138,9 @@ def format_safe_sql_predicate(column_name: str, literal_value: str) -> str:
     clean_col = validate_sql_identifier(column_name)
     escaped = str(literal_value).replace("'", "''")
     return f"{clean_col} = '{escaped}'"
+
+
+_GLOBAL_LITERAL_CACHE: Dict[Tuple[str, str, str], List[str]] = {}
 
 
 class LiteralResolver:
@@ -207,8 +213,12 @@ class LiteralResolver:
         clamped_limit = min(max(1, int(limit)), 500)
 
         cache_key = (clean_table, clean_col)
+        global_key = (self.target, clean_table, clean_col)
         if cache_key in self._cache:
             return self._cache[cache_key]
+        if global_key in _GLOBAL_LITERAL_CACHE:
+            self._cache[cache_key] = _GLOBAL_LITERAL_CACHE[global_key]
+            return _GLOBAL_LITERAL_CACHE[global_key]
 
         if self.target in ("local", "sqlite"):
             inspector = SchemaInspector(target="local", settings=self.settings)
@@ -228,6 +238,7 @@ class LiteralResolver:
             values = [str(r[0]) for r in cur.fetchall() if r[0] is not None]
             conn.close()
             self._cache[cache_key] = values
+            _GLOBAL_LITERAL_CACHE[global_key] = values
             return values
 
         if self.target == "duckdb":
@@ -247,6 +258,7 @@ class LiteralResolver:
             rows = self.duckdb_conn.execute(sql, [clamped_limit]).fetchall()
             values = [str(r[0]) for r in rows if r[0] is not None]
             self._cache[cache_key] = values
+            _GLOBAL_LITERAL_CACHE[global_key] = values
             return values
 
         # Live PostgreSQL
@@ -267,6 +279,7 @@ class LiteralResolver:
             res = execute_readonly_query(sql, params=(clamped_limit,), settings=self.settings)
             values = [str(r[clean_col]) for r in res.get("rows", []) if r.get(clean_col) is not None]
             self._cache[cache_key] = values
+            _GLOBAL_LITERAL_CACHE[global_key] = values
             return values
         except Exception as exc:
             logger.debug("PostgreSQL distinct literal lookup unavailable: %s", exc)
@@ -359,6 +372,7 @@ class LiteralResolver:
     def clear_index(self) -> None:
         """Clears cached literals and Chroma distinct value collection."""
         self._cache.clear()
+        _GLOBAL_LITERAL_CACHE.clear()
         self._observed_values.clear()
         if self._chroma_client is not None:
             try:
@@ -524,9 +538,6 @@ class LiteralResolver:
                 matched_keys.add(key)
                 matches.append(m)
 
-        if require_db_evidence:
-            return matches
-
         # 2. Check Live Database Distinct Cell Values for configured categorical columns (backward compatibility)
         for table, col in INDEXED_CATEGORICAL_COLUMNS:
             if candidate_tables and table not in {t.split(".")[-1] for t in candidate_tables}:
@@ -555,30 +566,7 @@ class LiteralResolver:
                             )
                         )
 
-        # 3. Legacy Domain Synonyms fallback (when offline/unconnected for Problem 1 regression tests)
-        for table, synonym_dict in COMMON_DOMAIN_SYNONYMS.items():
-            if candidate_tables and table not in {t.split(".")[-1] for t in candidate_tables}:
-                continue
-            for phrase, literal in synonym_dict.items():
-                if re.search(r"\b" + re.escape(phrase) + r"\b", q_lower):
-                    col = "attendance_code" if table == "staff_attendance" else ("tier" if table == "outlets" else "stage")
-                    key = (table, col, literal)
-                    if key not in matched_keys:
-                        matched_keys.add(key)
-                        matches.append(
-                            LiteralMatch(
-                                term=phrase,
-                                table_name=table,
-                                column_name=col,
-                                database_literal=literal,
-                                match_type="synonym",
-                                sql_predicate=format_safe_sql_predicate(col, literal),
-                                confidence=0.80,
-                                evidence="Domain synonym mapping (offline fallback)",
-                            )
-                        )
-
-        # Step 3: Geographical & Categorical Typo / Fuzzy Matching
+        # Step 3a: Geographical State Typo / Fuzzy Matching
         matched_state_tuple = self._resolve_state_fuzzy(user_text)
         if matched_state_tuple:
             raw_term, matched_state, match_type = matched_state_tuple
@@ -600,8 +588,57 @@ class LiteralResolver:
                         database_literal=matched_state,
                         match_type=match_type,
                         sql_predicate=f"state_name = '{matched_state}'",
+                        confidence=0.98 if match_type == "exact" else 0.94,
+                        evidence=f"Observed state '{matched_state}' in outlets.state_name",
                     )
                 )
+
+        # Step 3b: Cluster Fuzzy & Typo Matching (e.g. 'decan' -> 'Deccan%')
+        if not candidate_tables or "outlets" in {t.split(".")[-1] for t in candidate_tables}:
+            matched_cluster_tuple = self._resolve_cluster_fuzzy(user_text)
+            if matched_cluster_tuple:
+                raw_term, cluster_val, pred, match_type, conf = matched_cluster_tuple
+                key = ("outlets", "cluster_name", cluster_val)
+                if key not in matched_keys:
+                    matched_keys.add(key)
+                    matches.append(
+                        LiteralMatch(
+                            term=raw_term,
+                            table_name="outlets",
+                            column_name="cluster_name",
+                            database_literal=cluster_val,
+                            match_type=match_type,
+                            sql_predicate=pred,
+                            confidence=conf,
+                            evidence=f"Cluster region '{cluster_val}' resolved for outlets.cluster_name",
+                        )
+                    )
+
+        if require_db_evidence:
+            return matches
+
+        # 4. Legacy Domain Synonyms fallback (when offline/unconnected for Problem 1 regression tests)
+        for table, synonym_dict in COMMON_DOMAIN_SYNONYMS.items():
+            if candidate_tables and table not in {t.split(".")[-1] for t in candidate_tables}:
+                continue
+            for phrase, literal in synonym_dict.items():
+                if re.search(r"\b" + re.escape(phrase) + r"\b", q_lower):
+                    col = "attendance_code" if table == "staff_attendance" else ("tier" if table == "outlets" else "stage")
+                    key = (table, col, literal)
+                    if key not in matched_keys:
+                        matched_keys.add(key)
+                        matches.append(
+                            LiteralMatch(
+                                term=phrase,
+                                table_name=table,
+                                column_name=col,
+                                database_literal=literal,
+                                match_type="synonym",
+                                sql_predicate=format_safe_sql_predicate(col, literal),
+                                confidence=0.80,
+                                evidence="Domain synonym mapping (offline fallback)",
+                            )
+                        )
 
         return matches
 
@@ -632,6 +669,65 @@ class LiteralResolver:
             close = difflib.get_close_matches(bg, multi_word_states, n=1, cutoff=0.80)
             if close:
                 return bg, close[0], "fuzzy"
+
+        return None
+
+    def _resolve_cluster_fuzzy(self, user_text: str) -> Optional[Tuple[str, str, str, str, float]]:
+        """Resolves natural language cluster references (e.g. 'decan', 'deccan 2', 'coastal')
+        with typo-tolerance and sub-cluster detection.
+
+        Returns:
+            (raw_term, database_literal, sql_predicate, match_type, confidence)
+        """
+        words = re.findall(r"[a-zA-Z0-9]+", user_text)
+
+        for i, w in enumerate(words):
+            if w.lower() in STOP_WORDS or len(w) < 4:
+                continue
+
+            matched_region = None
+            is_exact = False
+            for r in KNOWN_CLUSTER_REGIONS:
+                if w.lower() == r.lower():
+                    matched_region = r
+                    is_exact = True
+                    break
+
+            if not matched_region:
+                close = difflib.get_close_matches(w.capitalize(), KNOWN_CLUSTER_REGIONS, n=1, cutoff=0.70)
+                if close:
+                    matched_region = close[0]
+                    is_exact = False
+
+            if matched_region:
+                # Check for sub-cluster number 1-4 (e.g., 'decan 2', 'decan-2', 'deccan 4')
+                sub_num = None
+                raw_term = w
+                if i + 1 < len(words) and words[i + 1].isdigit() and 1 <= int(words[i + 1]) <= 4:
+                    sub_num = words[i + 1]
+                    raw_term = f"{w} {sub_num}"
+                else:
+                    match_num = re.search(r"[-_]?([1-4])$", w)
+                    if match_num and len(w) > 4:
+                        sub_num = match_num.group(1)
+
+                if sub_num:
+                    full_cluster = f"{matched_region}-{sub_num}"
+                    return (
+                        raw_term,
+                        full_cluster,
+                        f"cluster_name = '{full_cluster}'",
+                        "cluster_exact" if is_exact else "cluster_fuzzy",
+                        0.98 if is_exact else 0.95,
+                    )
+                else:
+                    return (
+                        raw_term,
+                        f"{matched_region}%",
+                        f"cluster_name LIKE '{matched_region}%'",
+                        "cluster_region_exact" if is_exact else "cluster_region_fuzzy",
+                        0.98 if is_exact else 0.95,
+                    )
 
         return None
 
