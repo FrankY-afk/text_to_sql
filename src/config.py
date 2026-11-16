@@ -51,7 +51,7 @@ class Settings(BaseSettings):
         description="Selected LLM inference backend ('huggingface', 'ollama', 'mock')",
     )
     llm_model: str = Field(
-        default="Qwen/Qwen2.5-Coder-32B-Instruct",
+        default="zai-org/GLM-5.3-Flash",
         description="Target Hugging Face model repository",
     )
     hf_api_token: Optional[SecretStr] = Field(

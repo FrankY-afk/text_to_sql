@@ -47,7 +47,7 @@ logger = logging.getLogger(__name__)
 class HuggingFaceChatModel(BaseChatModel):
     """Custom LangChain BaseChatModel wrapping Hugging Face Inference API."""
 
-    model_name: str = "Qwen/Qwen2.5-Coder-32B-Instruct"
+    model_name: str = "zai-org/GLM-5.3-Flash"
     temperature: float = 0.0
     max_tokens: int = 1024
     hf_client: Optional[HuggingFaceClient] = None
