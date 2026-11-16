@@ -1,10 +1,11 @@
-"""Interactive Terminal CLI Console for Text-to-SQL (Spider 2.0 + MCP).
+"""Interactive Terminal CLI Console for Text-to-SQL (Spider 2.0 + MCP + LangChain).
 
 A streamlined developer REPL:
 - Free-text query input (natural language or custom SQL).
-- Adaptive CTE / Direct query planning with MCP schema grounding.
+- Option 1: End-to-End LangChain Autonomous Agent with 12 native MCP tools.
+- Option 2: Multi-Turn Conversational Memory (follow-up query detection, filter inheritance, drill-downs).
 - Execution-grounded AST validation and self-repair.
-- Outputs query results FIRST, followed by the generated SQL.
+- Outputs query results FIRST, followed by the generated SQL SECOND.
 """
 
 from __future__ import annotations
@@ -23,8 +24,10 @@ from rich.table import Table
 from rich.text import Text
 
 from src.config import get_settings
+from src.conversational_memory import ConversationalMemory
 from src.debugger import ExecutionGroundedDebugger
 from src.evaluator import run_full_problem1_benchmark
+from src.langchain_agent import LangChainText2SQLAgent
 from src.literal_resolver import LiteralResolver
 from src.query_executor import MCPQueryExecutor
 from src.schema_inspector import SchemaInspector
@@ -35,14 +38,21 @@ console = Console()
 
 
 class InteractiveConsole:
-    """Streamlined CLI REPL for Text-to-SQL."""
+    """Streamlined CLI REPL for Text-to-SQL with LangChain Agent & Conversational Memory."""
 
     def __init__(self):
         self.settings = get_settings()
         self.executor = MCPQueryExecutor()
         self.generator = SQLGenerator(executor=self.executor)
         self.debugger = ExecutionGroundedDebugger(executor=self.executor, generator=self.generator)
+        self.memory = ConversationalMemory()
+        self.agent = LangChainText2SQLAgent(
+            executor=self.executor,
+            memory=self.memory,
+            settings=self.settings,
+        )
         self.active_target = "postgres"  # Default database target
+        self.active_engine = "agent"     # "agent" (LangChain) or "native" (Adaptive Debugger)
 
     def print_banner(self) -> None:
         """Displays a clean startup banner."""
@@ -51,104 +61,208 @@ class InteractiveConsole:
             if self.active_target == "postgres"
             else "local_problem1.db (SQLite)"
         )
+        engine_label = "LangChain Agent (12 MCP Tools)" if self.active_engine == "agent" else "Native Adaptive Debugger"
+
         banner_content = (
-            "[bold cyan]Text-to-SQL Assistant[/bold cyan] [dim](Spider 2.0 • MCP • Adaptive CTE • AST Self-Repair)[/dim]\n"
+            "[bold cyan]Text-to-SQL Assistant[/bold cyan] [dim](Spider 2.0 • MCP • LangChain • Multi-Turn Memory)[/dim]\n"
             f"[bold yellow]Active Database Target:[/bold yellow] [bold green]{self.active_target.upper()}[/bold green] "
-            f"([dim]{target_info}[/dim])\n\n"
-            "[dim]Commands: [white]'target'[/white] to switch DB | [white]'bench'[/white] to run benchmarks | "
-            "[white]'tables'[/white] to list tables | [white]'exit'[/white] to quit[/dim]"
+            f"([dim]{target_info}[/dim])\n"
+            f"[bold yellow]Active Engine:[/bold yellow] [bold magenta]{engine_label}[/bold magenta]\n\n"
+            "[dim]Commands: [white]'mode'[/white] to toggle engine | [white]'history'[/white] to view turns | "
+            "[white]'reset'[/white] for new context | [white]'target'[/white] to switch DB | [white]'exit'[/white] to quit[/dim]"
         )
         console.print(Panel(banner_content, border_style="cyan", padding=(1, 2)))
 
     def run_query(self, user_query: str) -> None:
-        """Processes a natural language query through the adaptive debugger.
+        """Processes a natural language query with conversational follow-up handling.
 
         CRITICAL REQUIREMENT:
-        Outputs the result of the query FIRST, followed by the generated SQL.
+        Outputs the result of the query FIRST, followed by the generated SQL SECOND.
         """
         tgt = self.active_target
         t0 = time.time()
 
-        with console.status("[bold cyan]Analyzing intent, grounding schema, and generating SQL...[/bold cyan]", spinner="dots"):
-            debug_res = self.debugger.execute_with_debugging(user_query, target=tgt)
-            elapsed = (time.time() - t0) * 1000
+        if self.active_engine == "agent":
+            # -------------------------------------------------------------
+            # Engine 1: LangChain Autonomous Agent
+            # -------------------------------------------------------------
+            with console.status("[bold cyan]LangChain Agent: Coordinating MCP tools, schema, and LLM...[/bold cyan]", spinner="dots"):
+                res = self.agent.run(user_query, target=tgt)
+                elapsed = (time.time() - t0) * 1000
 
-        # Determine strategy type
-        is_cte = "WITH " in debug_res.final_sql.upper().strip()
-        strategy_label = "Adaptive CTE" if is_cte else "Adaptive Direct"
+            # Follow-up notification
+            if res.is_followup and res.followup_context:
+                console.print(
+                    f"\n[dim cyan]🔗 Follow-up context resolved: '{res.resolved_query}' "
+                    f"(Turn #{res.followup_context.parent_turn_id})[/dim cyan]"
+                )
 
-        # -------------------------------------------------------------
-        # 1. DISPLAY OUTPUT OF THE QUERY FIRST
-        # -------------------------------------------------------------
-        console.print("\n")
-        if debug_res.success:
-            # If a scalar percentage / numeric aggregate was computed
-            if debug_res.raw_result is not None:
-                contract_name = (
-                    debug_res.semantic_report.detected_grain
-                    if debug_res.semantic_report
-                    else "Aggregate Metric"
-                )
-                metric_panel = (
-                    f"[bold white]Computed Result:[/bold white] [bold green]{debug_res.raw_result:.2f}%[/bold green]\n"
-                    f"[dim]Metric Grain: {contract_name} | Plausibility Bound: [0%, 100%][/dim]"
-                )
-                console.print(Panel(metric_panel, title="[bold green]Query Output[/bold green]", border_style="green"))
+            # -------------------------------------------------------------
+            # 1. DISPLAY OUTPUT OF THE QUERY FIRST
+            # -------------------------------------------------------------
+            console.print("\n")
+            if res.success:
+                if res.raw_result is not None:
+                    metric_panel = (
+                        f"[bold white]Computed Result:[/bold white] [bold green]{res.raw_result:.2f}%[/bold green]\n"
+                        f"[dim]Metric Grain: Autonomous Calculation | Plausibility Bound: [0%, 100%][/dim]"
+                    )
+                    console.print(Panel(metric_panel, title="[bold green]Query Output[/bold green]", border_style="green"))
 
-            # If tabular rows returned
-            rows = debug_res.rows
-            columns = debug_res.columns
-            if rows:
-                row_label = f"{len(rows)} row" if len(rows) == 1 else f"{len(rows)} rows"
-                table_title = f"Query Output ({row_label} in {elapsed:.1f}ms)"
-                data_table = Table(
-                    title=table_title,
-                    border_style="green",
-                    header_style="bold cyan",
-                    show_header=True,
+                rows = res.rows
+                columns = res.columns
+                if rows:
+                    row_label = f"{len(rows)} row" if len(rows) == 1 else f"{len(rows)} rows"
+                    table_title = f"Query Output ({row_label} in {elapsed:.1f}ms)"
+                    data_table = Table(
+                        title=table_title,
+                        border_style="green",
+                        header_style="bold cyan",
+                        show_header=True,
+                    )
+                    for col in columns:
+                        data_table.add_column(str(col))
+                    for row in rows:
+                        data_table.add_row(*[str(row.get(c, "")) for c in columns])
+                    console.print(data_table)
+                elif res.raw_result is None:
+                    console.print(Panel(
+                        "[bold yellow]Query executed successfully, but returned 0 matching rows.[/bold yellow]",
+                        title="[bold yellow]Query Output[/bold yellow]",
+                        border_style="yellow",
+                    ))
+            else:
+                err_msg = (
+                    f"[bold red]Status:[/bold red] Execution Failed\n"
+                    f"[bold red]Error:[/bold red] {res.error or 'Unknown Error'}\n"
+                    f"[bold yellow]Steps Taken:[/bold yellow] {' -> '.join(res.steps_taken)}"
                 )
-                for col in columns:
-                    data_table.add_column(str(col))
-                for row in rows:
-                    data_table.add_row(*[str(row.get(c, "")) for c in columns])
-                console.print(data_table)
-            elif debug_res.raw_result is None:
-                console.print(Panel(
-                    "[bold yellow]Query executed successfully, but returned 0 matching rows.[/bold yellow]",
-                    title="[bold yellow]Query Output[/bold yellow]",
-                    border_style="yellow",
-                ))
-        else:
-            # Execution failure
-            error_cat = debug_res.error_category.value if debug_res.error_category else "Execution Error"
-            err_msg = (
-                f"[bold red]Status:[/bold red] Failed after {debug_res.total_attempts} attempt(s)\n"
-                f"[bold red]Category:[/bold red] {error_cat}\n"
-                f"[bold yellow]Diagnostic Notes:[/bold yellow] {debug_res.explanation}"
+                console.print(Panel(err_msg, title="[bold red]Query Execution Failed[/bold red]", border_style="red"))
+
+            # -------------------------------------------------------------
+            # 2. DISPLAY GENERATED SQL SECOND
+            # -------------------------------------------------------------
+            sql_title = "[bold cyan]Generated SQL[/bold cyan] [dim](LangChain Agent • AST Guarded)[/dim]"
+            console.print("\n")
+            console.print(Panel(
+                Syntax(res.sql, "sql", theme="monokai", line_numbers=True),
+                title=sql_title,
+                border_style="cyan",
+            ))
+
+            # -------------------------------------------------------------
+            # 3. CONCISE METADATA FOOTER
+            # -------------------------------------------------------------
+            status_color = "green" if res.success else "red"
+            status_text = "Verified Read-Only" if res.success else "Execution Error"
+            tools_used = len(res.intermediate_tool_calls)
+            console.print(
+                f"[dim]Target: {tgt.upper()} | Engine: LangChain Agent ({tools_used} tool calls) | "
+                f"Latency: {elapsed:.1f}ms | [{status_color}]{status_text}[/{status_color}][/dim]\n"
             )
-            console.print(Panel(err_msg, title="[bold red]Query Execution Failed[/bold red]", border_style="red"))
 
-        # -------------------------------------------------------------
-        # 2. DISPLAY GENERATED SQL SECOND
-        # -------------------------------------------------------------
-        sql_title = f"[bold cyan]Generated SQL[/bold cyan] [dim]({strategy_label})[/dim]"
-        console.print("\n")
-        console.print(Panel(
-            Syntax(debug_res.final_sql, "sql", theme="monokai", line_numbers=True),
-            title=sql_title,
-            border_style="cyan",
-        ))
+        else:
+            # -------------------------------------------------------------
+            # Engine 2: Native Execution-Grounded Debugger
+            # -------------------------------------------------------------
+            followup_res = self.memory.resolve_followup(user_query, target=tgt)
+            active_q = followup_res.resolved_query
 
-        # -------------------------------------------------------------
-        # 3. CONCISE METADATA FOOTER
-        # -------------------------------------------------------------
-        status_color = "green" if debug_res.success else "red"
-        status_text = "Verified Read-Only" if debug_res.success else "Execution Error"
-        attempts_info = f"Attempts: {debug_res.total_attempts}" if debug_res.total_attempts > 1 else "1 attempt"
-        console.print(
-            f"[dim]Target: {tgt.upper()} | Plan: {strategy_label} | Latency: {elapsed:.1f}ms | "
-            f"{attempts_info} | [{status_color}]{status_text}[/{status_color}][/dim]\n"
-        )
+            if followup_res.is_followup:
+                console.print(
+                    f"\n[dim cyan]🔗 Follow-up context resolved: '{active_q}' "
+                    f"(Turn #{followup_res.parent_turn_id})[/dim cyan]"
+                )
+
+            with console.status("[bold cyan]Analyzing intent, grounding schema, and generating SQL...[/bold cyan]", spinner="dots"):
+                debug_res = self.debugger.execute_with_debugging(active_q, target=tgt)
+                elapsed = (time.time() - t0) * 1000
+
+            is_cte = "WITH " in debug_res.final_sql.upper().strip()
+            strategy_label = "Adaptive CTE" if is_cte else "Adaptive Direct"
+
+            # -------------------------------------------------------------
+            # 1. DISPLAY OUTPUT OF THE QUERY FIRST
+            # -------------------------------------------------------------
+            console.print("\n")
+            if debug_res.success:
+                if debug_res.raw_result is not None:
+                    contract_name = (
+                        debug_res.semantic_report.detected_grain
+                        if debug_res.semantic_report
+                        else "Aggregate Metric"
+                    )
+                    metric_panel = (
+                        f"[bold white]Computed Result:[/bold white] [bold green]{debug_res.raw_result:.2f}%[/bold green]\n"
+                        f"[dim]Metric Grain: {contract_name} | Plausibility Bound: [0%, 100%][/dim]"
+                    )
+                    console.print(Panel(metric_panel, title="[bold green]Query Output[/bold green]", border_style="green"))
+
+                rows = debug_res.rows
+                columns = debug_res.columns
+                if rows:
+                    row_label = f"{len(rows)} row" if len(rows) == 1 else f"{len(rows)} rows"
+                    table_title = f"Query Output ({row_label} in {elapsed:.1f}ms)"
+                    data_table = Table(
+                        title=table_title,
+                        border_style="green",
+                        header_style="bold cyan",
+                        show_header=True,
+                    )
+                    for col in columns:
+                        data_table.add_column(str(col))
+                    for row in rows:
+                        data_table.add_row(*[str(row.get(c, "")) for c in columns])
+                    console.print(data_table)
+                elif debug_res.raw_result is None:
+                    console.print(Panel(
+                        "[bold yellow]Query executed successfully, but returned 0 matching rows.[/bold yellow]",
+                        title="[bold yellow]Query Output[/bold yellow]",
+                        border_style="yellow",
+                    ))
+            else:
+                error_cat = debug_res.error_category.value if debug_res.error_category else "Execution Error"
+                err_msg = (
+                    f"[bold red]Status:[/bold red] Failed after {debug_res.total_attempts} attempt(s)\n"
+                    f"[bold red]Category:[/bold red] {error_cat}\n"
+                    f"[bold yellow]Diagnostic Notes:[/bold yellow] {debug_res.explanation}"
+                )
+                console.print(Panel(err_msg, title="[bold red]Query Execution Failed[/bold red]", border_style="red"))
+
+            # -------------------------------------------------------------
+            # 2. DISPLAY GENERATED SQL SECOND
+            # -------------------------------------------------------------
+            sql_title = f"[bold cyan]Generated SQL[/bold cyan] [dim]({strategy_label})[/dim]"
+            console.print("\n")
+            console.print(Panel(
+                Syntax(debug_res.final_sql, "sql", theme="monokai", line_numbers=True),
+                title=sql_title,
+                border_style="cyan",
+            ))
+
+            # -------------------------------------------------------------
+            # 3. METADATA FOOTER
+            # -------------------------------------------------------------
+            status_color = "green" if debug_res.success else "red"
+            status_text = "Verified Read-Only" if debug_res.success else "Execution Error"
+            attempts_info = f"Attempts: {debug_res.total_attempts}" if debug_res.total_attempts > 1 else "1 attempt"
+            console.print(
+                f"[dim]Target: {tgt.upper()} | Plan: {strategy_label} | Latency: {elapsed:.1f}ms | "
+                f"{attempts_info} | [{status_color}]{status_text}[/{status_color}][/dim]\n"
+            )
+
+            # Record turn in Conversational Memory
+            self.memory.add_turn(
+                user_query=user_query,
+                resolved_query=active_q,
+                generated_sql=debug_res.final_sql,
+                target=tgt,
+                columns=debug_res.columns,
+                rows=debug_res.rows,
+                row_count=debug_res.row_count,
+                raw_result=debug_res.raw_result,
+                success=debug_res.success,
+            )
 
     def run_direct_sql(self, sql: str) -> None:
         """Executes custom SQL through MCP with real-time AST safety.
@@ -259,6 +373,39 @@ class InteractiveConsole:
         except Exception as exc:
             console.print(f"[bold red]Failed to inspect tables:[/bold red] {exc}")
 
+    def show_history(self) -> None:
+        """Displays conversational history turns in a Rich table."""
+        turns = self.memory.turns
+        if not turns:
+            console.print("\n[dim yellow]No conversation history in current session.[/dim yellow]\n")
+            return
+
+        hist_table = Table(
+            title=f"Multi-Turn Conversation History ({len(turns)} turns)",
+            border_style="cyan",
+            header_style="bold yellow",
+        )
+        hist_table.add_column("Turn", style="dim", width=5)
+        hist_table.add_column("User Query", style="white")
+        hist_table.add_column("Contextualized Query", style="cyan")
+        hist_table.add_column("Output", style="green", width=12)
+        hist_table.add_column("Status", style="bold", width=8)
+
+        for t in turns:
+            out_str = f"{t.raw_result:.1f}%" if t.raw_result is not None else f"{t.row_count} rows"
+            status_str = "[bold green]OK[/bold green]" if t.success else "[bold red]FAIL[/bold red]"
+            hist_table.add_row(
+                f"#{t.turn_id}",
+                t.user_query,
+                t.resolved_query if t.resolved_query != t.user_query else "(same)",
+                out_str,
+                status_str,
+            )
+
+        console.print("\n")
+        console.print(hist_table)
+        console.print(f"[dim]Use 'reset' to clear conversation memory for a new session.[/dim]\n")
+
     def run_benchmark_suite(self) -> None:
         """Runs the 10 Spider 2.0 failure mode regression suite."""
         console.print("\n[bold cyan]=== Running Spider 2.0 Analytical Regression Suite (10 Failure Modes) ===[/bold cyan]\n")
@@ -310,8 +457,9 @@ class InteractiveConsole:
 
         while True:
             try:
+                engine_badge = "LangChain" if self.active_engine == "agent" else "Native"
                 user_input = Prompt.ask(
-                    f"\n[bold yellow]Query[/bold yellow] ([cyan]{self.active_target}[/cyan])"
+                    f"\n[bold yellow]Query[/bold yellow] ([cyan]{self.active_target}[/cyan] • [magenta]{engine_badge}[/magenta])"
                 ).strip()
 
                 if not user_input:
@@ -326,14 +474,30 @@ class InteractiveConsole:
                 elif cmd in ("help", "?"):
                     console.print(
                         "\n[bold cyan]Command Cheatsheet:[/bold cyan]\n"
+                        "  • [yellow]mode[/yellow] / [yellow]agent[/yellow]   - Toggle between LangChain Agent and Native Debugger engine\n"
+                        "  • [yellow]history[/yellow] / [yellow]hist[/yellow]   - View multi-turn conversation history and resolved context\n"
+                        "  • [yellow]reset[/yellow] / [yellow]new[/yellow]      - Clear conversation memory to start fresh\n"
                         "  • [yellow]target[/yellow] / [yellow]switch[/yellow]  - Toggle between PostgreSQL and local SQLite\n"
                         "  • [yellow]bench[/yellow]               - Run 10-case Spider 2.0 regression benchmarks\n"
                         "  • [yellow]tables[/yellow] / [yellow]schema[/yellow]  - List accessible tables in active database\n"
                         "  • [yellow]clear[/yellow] / [yellow]cls[/yellow]        - Clear terminal screen\n"
                         "  • [yellow]exit[/yellow] / [yellow]quit[/yellow]       - Exit console\n"
                         "  • [white]<text question>[/white]      - Any natural language query (e.g. 'Show outlets in Maharashtra')\n"
+                        "  • [white]<follow-up>[/white]          - Multi-turn follow-up (e.g. 'Now break down by cluster')\n"
                         "  • [white]<sql statement>[/white]      - Any SELECT/WITH query (validated and executed safely)\n"
                     )
+
+                elif cmd in ("mode", "agent", "engine"):
+                    self.active_engine = "native" if self.active_engine == "agent" else "agent"
+                    label = "LangChain Agent (12 MCP Tools)" if self.active_engine == "agent" else "Native Adaptive Debugger"
+                    console.print(f"\n[bold yellow]Switched engine to:[/bold yellow] [bold magenta]{label}[/bold magenta]\n")
+
+                elif cmd in ("history", "hist"):
+                    self.show_history()
+
+                elif cmd in ("reset", "new", "clear-history"):
+                    self.memory.clear()
+                    console.print("\n[bold green]Conversational memory reset for a new session.[/bold green]\n")
 
                 elif cmd in ("target", "switch"):
                     self.active_target = "local" if self.active_target == "postgres" else "postgres"

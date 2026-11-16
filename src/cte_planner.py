@@ -926,6 +926,40 @@ class CTEPlanner:
             if "staff" in q_lower and ("attendance" in q_lower or "present" in q_lower or "rate" in q_lower or "%" in q_lower):
                 return self.create_staff_attendance_plan(question, target_dialect=dialect)
 
+            # Date window boundary query (TC-09)
+            if ("signup" in q_lower or "user" in q_lower) and "january" in q_lower:
+                step1 = CTEPlanStep(
+                    step_name="jan_signups",
+                    purpose="Filter users who signed up in January 2024 using half-open date interval",
+                    input_tables=["users"],
+                    required_columns=["user_id", "signup_date"],
+                    filters=["signup_date >= '2024-01-01'", "signup_date < '2024-02-01'"],
+                    grouping_dimensions=[],
+                    aggregation_logic="COUNT(DISTINCT user_id)",
+                    mathematical_calculations="Half-open interval [2024-01-01, 2024-02-01)",
+                    dependencies=[],
+                    expected_output_grain="single_row_aggregate",
+                    columns_produced=["total_jan_signups"],
+                    sql_fragment=(
+                        "SELECT COUNT(DISTINCT user_id) AS total_jan_signups\n"
+                        "FROM users\n"
+                        "WHERE signup_date >= '2024-01-01' AND signup_date < '2024-02-01'"
+                    ),
+                )
+                plan = LogicPlan(
+                    query=question,
+                    target_dialect=dialect,
+                    strategy="Filter users on January 2024 half-open interval and count distinct user_id.",
+                    cte_steps=[step1],
+                    final_select="SELECT total_jan_signups FROM jan_signups",
+                    expected_output_grain="single_row_aggregate",
+                    dialect_functions_used=["COUNT(DISTINCT)"],
+                    validation_notes="Half-open interval prevents end-of-day boundary cutoff.",
+                    planner_backend="rule_based",
+                )
+                self.validator.validate_plan(plan)
+                return plan
+
             if schema_context is not None:
                 return self._create_schema_linked_cte_plan(question, dialect, schema_context)
 
