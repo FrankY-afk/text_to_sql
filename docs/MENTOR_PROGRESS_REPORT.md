@@ -15,7 +15,7 @@ Traditional Text-to-SQL models frequently achieve high syntactic execution rates
 3. **Implicit Business Logic & Undocumented Metrics**: Calculations depending on company-specific business definitions (e.g., Non-Performing Assets [NPA 90+ DPD], attendance credit rules, 30-day rolling churn) that do not exist within database schemas alone.
 
 ### What We Have Built
-We have designed and deployed a comprehensive, enterprise-ready Text-to-SQL engine built on the **Model Context Protocol (MCP)**, supporting **PostgreSQL**, **DuckDB**, **SQLite**, and **open-weight LLMs (Hugging Face / Qwen 2.5 Coder)**. 
+We have designed and deployed a comprehensive, enterprise-ready Text-to-SQL engine built on the **Model Context Protocol (MCP)**, supporting **PostgreSQL**, **DuckDB**, **SQLite**, and **open-weight LLMs (Hugging Face / SQRL-35B and Qwen 2.5 Coder)**. 
 
 The architecture features:
 - **Adaptive Common Table Expression (CTE) Planning**: Intelligently decomposes complex multi-stage analytical queries into topological DAGs while executing simple queries directly without overhead.
@@ -49,7 +49,7 @@ flowchart TD
         PlannerDecision -->|Complex Multi-Grain| CTEPlan["Adaptive CTE Logic Planner (Topological DAG)"]
         PlannerDecision -->|Simple Filter/Lookup| DirectPlan["Adaptive Direct Query Planner (0 CTEs)"]
         
-        CTEPlan --> LLMGen["Hugging Face LLM Client (Qwen 2.5 Coder) / Compiler Fallback"]
+        CTEPlan --> LLMGen["Hugging Face LLM Client (SQRL-35B / Qwen 2.5 Coder) / Compiler Fallback"]
         DirectPlan --> LLMGen
     end
     
@@ -89,8 +89,8 @@ flowchart TD
    - Classifies errors across 10 distinct taxonomy categories with targeted repair advice.
    - Features SHA-256 state hashing to detect and break infinite repair loops.
 5. **Hugging Face LLM Client (`src/hf_client.py`)**:
-   - Supports open-weight code models (default: `Qwen/Qwen2.5-Coder-32B-Instruct`).
-   - Resilient token resolution (`HF_API_KEY`, `HF_TOKEN`, `TEXT2SQL_HF_API_TOKEN`), auto-retry on 503 model-loading states, and markdown code fence extraction.
+   - Supports open-weight code and reasoning models (default: `feyninc/sqrl-35b-a3b`, alongside `Qwen/Qwen2.5-Coder-32B-Instruct`).
+   - Native parsing of SQRL `<think>` and `<answer>` / `<sql>` action blocks as well as standard markdown code fences.
 
 ---
 

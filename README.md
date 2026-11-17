@@ -35,7 +35,7 @@ flowchart TD
     DialectRAG --> CTEPlanner
     
     CTEPlanner --> ValidatePlan["6. Validate CTE Plan & Dependencies (No Cycles / Forward Refs)"]
-    ValidatePlan --> HFGen["7. Hugging Face LLM Generation (Qwen 2.5 Coder / Offline Fallback)"]
+    ValidatePlan --> HFGen["7. Hugging Face LLM Generation (SQRL-35B / Qwen 2.5 Coder / Offline Fallback)"]
     
     HFGen --> ASTGate["8. SQLGlot AST Safety & Dialect Validation"]
     ASTGate --> SemGate["9. Deep Semantic & Contract Validation (Grain, Fan-out, Leaks)"]
@@ -105,7 +105,7 @@ text2SQL-MCP/
 
 ### 4.1 Prerequisites
 - Python 3.10+ (Tested on Python 3.14)
-- Hugging Face account (for live inference using Qwen 2.5 Coder or similar)
+- Hugging Face account (for live inference using feyninc/sqrl-35b-a3b, Qwen 2.5 Coder, or similar)
 - Access to PostgreSQL or local SQLite test database (included)
 
 ### 4.2 Install Dependencies
@@ -130,7 +130,7 @@ TEXT2SQL_POSTGRES_SSLMODE=require
 
 # Hugging Face LLM Configuration
 TEXT2SQL_LLM_BACKEND=huggingface
-TEXT2SQL_LLM_MODEL=Qwen/Qwen2.5-Coder-32B-Instruct
+TEXT2SQL_LLM_MODEL=feyninc/sqrl-35b-a3b
 # Hugging Face API Key (set HF_API_KEY, HF_TOKEN, or TEXT2SQL_HF_API_TOKEN):
 HF_API_KEY=hf_your_token_here
 ```
