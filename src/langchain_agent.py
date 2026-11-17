@@ -47,7 +47,7 @@ logger = logging.getLogger(__name__)
 class HuggingFaceChatModel(BaseChatModel):
     """Custom LangChain BaseChatModel wrapping Hugging Face Inference API."""
 
-    model_name: str = "zai-org/GLM-5.3-Flash"
+    model_name: str = "feyninc/sqrl-35b-a3b"
     temperature: float = 0.0
     max_tokens: int = 1024
     hf_client: Optional[HuggingFaceClient] = None
@@ -96,7 +96,7 @@ class HuggingFaceChatModel(BaseChatModel):
                 message = AIMessage(content=sql_resp)
                 return ChatResult(generations=[ChatGeneration(message=message)])
             except HuggingFaceInferenceError as exc:
-                logger.warning("Hugging Face chat completion failed: %s; falling back to offline", exc)
+                logger.debug("Hugging Face chat completion failed: %s; falling back to offline", exc)
 
         # Offline deterministic fallback notification
         fallback_msg = AIMessage(content="-- LLM inference offline. Execution-grounded planner engaged.")
@@ -283,7 +283,7 @@ class LangChainText2SQLAgent:
                     "literal_hints": context_args["literal_hints"],
                 })
             except Exception as exc:
-                logger.warning("LCEL generation failed: %s; falling back to debugger generator", exc)
+                logger.debug("LCEL generation failed: %s; falling back to debugger generator", exc)
                 generated_sql = ""
 
         # If LLM offline or empty, utilize adaptive generator

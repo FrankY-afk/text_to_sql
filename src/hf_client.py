@@ -22,6 +22,11 @@ from src.config import Settings, get_settings
 
 logger = logging.getLogger(__name__)
 
+# Suppress verbose third-party HTTP transport logging
+logging.getLogger("httpx").setLevel(logging.ERROR)
+logging.getLogger("httpcore").setLevel(logging.ERROR)
+logging.getLogger("huggingface_hub").setLevel(logging.ERROR)
+
 
 class HuggingFaceInferenceError(Exception):
     """Raised when Hugging Face API inference fails."""
@@ -59,7 +64,7 @@ class HuggingFaceClient:
         """Trips the circuit breaker to fail fast and protect against multi-second hangs."""
         cls._circuit_broken = True
         cls._circuit_broken_reason = reason
-        logger.warning("Hugging Face API circuit breaker tripped: %s", reason)
+        logger.debug("Hugging Face API circuit breaker tripped: %s", reason)
 
     def is_configured(self) -> bool:
         """Returns True if a valid Hugging Face API key/token or endpoint URL is configured and circuit is intact."""
@@ -134,15 +139,17 @@ class HuggingFaceClient:
             except Exception as exc:
                 last_error = exc
                 err_str = str(exc).lower()
-                logger.warning("Hugging Face inference attempt %d failed: %s", attempt + 1, exc)
+                logger.debug("Hugging Face inference attempt %d failed: %s", attempt + 1, exc)
 
-                # Permanent billing/auth/permissions errors -> trip circuit breaker immediately
+                # Permanent billing/auth/permissions/unsupported model errors -> trip circuit breaker immediately
                 if any(tok in err_str for tok in (
                     "402", "payment required", "pre-paid credits",
                     "401", "unauthorized", "invalid token",
                     "403", "forbidden",
+                    "400", "bad request", "model_not_supported", "not supported by any provider",
+                    "404", "not found",
                 )):
-                    HuggingFaceClient.trip_circuit_breaker(f"Permanent billing/auth error: {exc}")
+                    HuggingFaceClient.trip_circuit_breaker(f"Permanent model/billing/auth error: {exc}")
                     break
 
                 # If model is loading (503), wait and retry
@@ -157,17 +164,48 @@ class HuggingFaceClient:
 
     @staticmethod
     def extract_sql(response_text: str) -> str:
-        """Extracts clean SQL query from model response text, stripping markdown and commentary."""
+        """Extracts clean SQL query from model response text, stripping markdown and commentary.
+
+        Supports:
+        - SQRL agentic protocol (<answer>...</answer> and <sql>...</sql> tags)
+        - DeepSeek / Qwen reasoning blocks (<think>...</think> stripping)
+        - Standard markdown code fences (```sql ... ```)
+        - Raw SQL statements (WITH ...; SELECT ...;)
+        """
         text = response_text.strip()
 
-        # Match ```sql ... ``` or ``` ... ```
+        # 1. Strip reasoning blocks if present (<think>...</think>)
+        text = re.sub(r"<think>[\s\S]*?</think>", "", text, flags=re.IGNORECASE).strip()
+
+        # 2. Extract from SQRL <answer>...</answer> action blocks
+        answer_match = re.search(r"<answer>\s*([\s\S]*?)\s*</answer>", text, re.IGNORECASE)
+        if answer_match:
+            candidate = answer_match.group(1).strip()
+            # If answer contains code fences inside, extract from within them
+            code_fence = re.search(r"```(?:sql)?\s*([\s\S]*?)\s*```", candidate, re.IGNORECASE)
+            if code_fence:
+                candidate = code_fence.group(1).strip()
+            if candidate:
+                return candidate.rstrip(";") + ";"
+
+        # 3. Extract from SQRL <sql>...</sql> exploration blocks
+        sql_tag_match = re.search(r"<sql>\s*([\s\S]*?)\s*</sql>", text, re.IGNORECASE)
+        if sql_tag_match:
+            candidate = sql_tag_match.group(1).strip()
+            code_fence = re.search(r"```(?:sql)?\s*([\s\S]*?)\s*```", candidate, re.IGNORECASE)
+            if code_fence:
+                candidate = code_fence.group(1).strip()
+            if candidate:
+                return candidate.rstrip(";") + ";"
+
+        # 4. Match ```sql ... ``` or ``` ... ```
         sql_match = re.search(r"```(?:sql)?\s*([\s\S]*?)\s*```", text, re.IGNORECASE)
         if sql_match:
             candidate = sql_match.group(1).strip()
             if candidate:
                 return candidate.rstrip(";") + ";"
 
-        # If starts with WITH or SELECT, find end of statement
+        # 5. If starts with WITH or SELECT, find end of statement
         upper = text.upper()
         if upper.startswith("WITH ") or upper.startswith("SELECT "):
             # Find semicolon or return full text
@@ -176,7 +214,7 @@ class HuggingFaceClient:
                 return text[: semi_idx + 1].strip()
             return text + ";"
 
-        # Fallback: look for WITH ... or SELECT ... block in text
+        # 6. Fallback: look for WITH ... or SELECT ... block in text
         match_stmt = re.search(r"\b(WITH\s+[\s\S]+?;|SELECT\s+[\s\S]+?;)", text, re.IGNORECASE)
         if match_stmt:
             return match_stmt.group(1).strip()

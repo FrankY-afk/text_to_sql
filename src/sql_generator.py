@@ -561,7 +561,7 @@ MANDATORY RULES:
                     doc_context=doc_context,
                 )
             except Exception as exc:
-                logger.warning("Hugging Face inference error, falling back to verified CTE compiler: %s", exc)
+                logger.debug("Hugging Face inference error, falling back to verified CTE compiler: %s", exc)
 
         # Step 6: Verified CTE Plan Compiler fallback (guarantees mathematically correct execution)
         compiled_sql = CTEPlanCompiler.compile(plan, target_dialect=dialect)

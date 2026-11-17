@@ -51,7 +51,7 @@ class Settings(BaseSettings):
         description="Selected LLM inference backend ('huggingface', 'ollama', 'mock')",
     )
     llm_model: str = Field(
-        default="zai-org/GLM-5.3-Flash",
+        default="feyninc/sqrl-35b-a3b",
         description="Target Hugging Face model repository",
     )
     hf_api_token: Optional[SecretStr] = Field(

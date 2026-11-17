@@ -10,11 +10,16 @@ A streamlined developer REPL:
 
 from __future__ import annotations
 
+import logging
 import os
 from pathlib import Path
 import sys
 import time
 from typing import Any, Dict, List, Optional
+
+# Silence noisy external library logging from polluting the interactive CLI REPL
+for _noisy_logger in ("httpx", "httpcore", "huggingface_hub", "urllib3", "mcp", "chromadb"):
+    logging.getLogger(_noisy_logger).setLevel(logging.ERROR)
 
 from rich.console import Console
 from rich.panel import Panel

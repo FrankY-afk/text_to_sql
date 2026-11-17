@@ -33,6 +33,20 @@ SELECT outlet_code FROM outlets LIMIT 5;
     res3 = "SELECT staff_no, full_name FROM staff WHERE position = 'Officer';"
     assert HuggingFaceClient.extract_sql(res3) == "SELECT staff_no, full_name FROM staff WHERE position = 'Officer';"
 
+    # 4. SQRL model <answer> action block with <think> reasoning
+    res4 = """<think>
+    I will inspect the outlets table and filter by Deccan cluster.
+    </think>
+    The cluster Deccan contains 24 outlets.
+    <answer>
+    SELECT outlet_code, outlet_name FROM outlets WHERE cluster_name LIKE 'Deccan%';
+    </answer>"""
+    assert HuggingFaceClient.extract_sql(res4) == "SELECT outlet_code, outlet_name FROM outlets WHERE cluster_name LIKE 'Deccan%';"
+
+    # 5. SQRL model <sql> exploration block without semicolon
+    res5 = "<sql>SELECT DISTINCT cluster_name FROM outlets</sql>"
+    assert HuggingFaceClient.extract_sql(res5) == "SELECT DISTINCT cluster_name FROM outlets;"
+
 
 def test_build_generation_prompt():
     """Verifies that the generation prompt integrates CTE plan, dialect, schema, and literals."""
